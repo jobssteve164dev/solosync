@@ -32,7 +32,7 @@ jobs:
           test -n "$OVSX_PAT" || { echo "::error::OVSX_PAT is empty"; exit 1; }
           npx --yes ovsx -p "$OVSX_PAT" verify-pat SZLK
       - name: Set release version
-        run: npm version "${{ inputs.version }}" --no-git-tag-version
+        run: npm version "${{ inputs.version }}" --allow-same-version --no-git-tag-version
       - run: npm test
       - name: Package extension
         run: npx @vscode/vsce package --out "solosync-${{ inputs.version }}.vsix"
