@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync - Local Code Snapshots",
   "description": "Automatically protect uncommitted and committed VS Code workspaces with restorable snapshots in storage you control.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
