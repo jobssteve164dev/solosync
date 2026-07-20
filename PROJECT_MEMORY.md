@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.1` released to Visual Studio Marketplace and Open VSX.
+- Current stage: Version `0.0.2` released to Visual Studio Marketplace and Open VSX with the corrected full-color marketplace icon.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -34,5 +34,5 @@ This file stores stable project facts future agents should reuse. Do not paste r
 
 ## Handoff Notes
 
-- `SZLK.solosync@0.0.1` is publicly verified on Visual Studio Marketplace and Open VSX.
+- `SZLK.solosync@0.0.2` is publicly verified on Visual Studio Marketplace and Open VSX; icon rendering is generated with resvg and protected by a pixel-level regression test.
 - Continue from `/home/ubuntu/project/solosync`; do not recreate the project under `.solomap-global/memory/inbox`.
