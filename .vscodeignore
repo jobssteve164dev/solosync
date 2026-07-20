@@ -1,0 +1,10 @@
+.github/**
+.git/**
+docs/**
+src/**
+test/**
+.gitignore
+tsconfig.json
+*.vsix
+node_modules/**
+!node_modules/.bin/**

@@ -1,0 +1,101 @@
+{
+  "name": "solosync",
+  "displayName": "SoloSync - Local Code Snapshots",
+  "description": "Automatically protect uncommitted and committed VS Code workspaces with restorable snapshots in storage you control.",
+  "version": "0.0.1",
+  "publisher": "SZLK",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jobssteve164dev/solosync.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "SCM Providers"],
+  "keywords": ["backup", "snapshot", "git", "restore", "nas", "qnap", "workspace", "ai-coding"],
+  "activationEvents": [
+    "onView:solosync.history",
+    "onStartupFinished",
+    "onCommand:solosync.configure",
+    "onCommand:solosync.backupNow",
+    "onCommand:solosync.restoreSnapshot",
+    "onCommand:solosync.restoreFile",
+    "onCommand:solosync.verifySnapshot"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "solosync.configure", "title": "SoloSync: Choose Backup Location", "category": "SoloSync" },
+      { "command": "solosync.backupNow", "title": "SoloSync: Back Up Now", "category": "SoloSync", "icon": "$(cloud-upload)" },
+      { "command": "solosync.restoreSnapshot", "title": "SoloSync: Restore Snapshot", "category": "SoloSync" },
+      { "command": "solosync.restoreFile", "title": "SoloSync: Restore File", "category": "SoloSync" },
+      { "command": "solosync.verifySnapshot", "title": "SoloSync: Verify Snapshot", "category": "SoloSync" },
+      { "command": "solosync.refresh", "title": "SoloSync: Refresh History", "category": "SoloSync", "icon": "$(refresh)" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "solosync", "title": "SoloSync", "icon": "resources/activitybar.svg" }
+      ]
+    },
+    "views": {
+      "solosync": [
+        { "id": "solosync.history", "name": "Backup History" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "solosync.backupNow", "when": "view == solosync.history", "group": "navigation@1" },
+        { "command": "solosync.refresh", "when": "view == solosync.history", "group": "navigation@2" }
+      ],
+      "view/item/context": [
+        { "command": "solosync.restoreSnapshot", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@1" },
+        { "command": "solosync.restoreFile", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@2" },
+        { "command": "solosync.verifySnapshot", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@3" }
+      ],
+      "explorer/context": [
+        { "command": "solosync.backupNow", "when": "resourceScheme == file", "group": "navigation@50" }
+      ]
+    },
+    "configuration": {
+      "title": "SoloSync",
+      "properties": {
+        "solosync.backupDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Local or mounted NAS directory where SoloSync stores snapshots. Use 'SoloSync: Choose Backup Location' instead of editing this manually."
+        },
+        "solosync.autoBackupAfterCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Create a snapshot after the current Git commit changes."
+        },
+        "solosync.idleBackupMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "description": "Create a snapshot after this many minutes without further file changes. Set to 0 to disable."
+        },
+        "solosync.exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["node_modules", ".git", "out", "dist", "build", ".next", ".cache", "*.log"],
+          "description": "File or directory names excluded from snapshots."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test test/*.test.js",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.7.0"
+  }
+}
