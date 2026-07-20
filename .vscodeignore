@@ -3,7 +3,11 @@
 docs/**
 src/**
 test/**
+.solopreneur/**
+AGENTS.md
+PROJECT_MEMORY.md
 .gitignore
+
 tsconfig.json
 *.vsix
 node_modules/**

@@ -1,0 +1,5 @@
+id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt
+1,生成初始路线图,让 AI Agent 直接重写 .solopreneur/roadmap.csv，基于当前项目文件生成真正可执行的定制化路线图。,目标与路径确认,,agy,阅读 .solopreneur/bootstrap-roadmap-instructions.md 和 .solopreneur/roadmap-methodology.md，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后按指令文件中的自检要求重新读取并校验该 CSV。,Pending,2026-07-20T06:40:12.111Z,
+2,明确交付目标与成功标准,让 AI Agent 从项目文件出发，梳理真实目标、使用对象、范围边界和可验证的成功标准。,目标与路径确认,1,agy,分析这个项目的交付目标、使用对象、验证方式和主要风险，并在 docs/project-brief.md 中写出清晰的范围边界、成功标准和下一步行动；若证据表明这是对外产品，再补充客户验证要求。,Pending,2026-07-20T06:40:12.111Z,
+3,交付首个可验证切片,让 AI Agent 将项目目标转成可以运行、查看或按文档验收的最小交付结果。,交付与验证,2,agy,阅读 docs/project-brief.md，规划并实现首个可验证交付切片，补充运行方式和最窄验证命令。,Pending,2026-07-20T06:40:12.111Z,
+4,验证结果并安排下一轮,让 AI Agent 收集本次交付的运行、使用或验收结果，并把反馈转成下一轮动作。,结果反馈与迭代,3,agy,基于当前项目文件创建 docs/iteration-review.md，记录验证证据、反馈来源、未解决问题和下一轮改进任务；若这是对外产品，加入触达与用户反馈动作。,Pending,2026-07-20T06:40:12.111Z,

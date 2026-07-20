@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "format": "solopreneur.stepHandoff",
+  "description": "Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.",
+  "completionCriteria": [
+    "已经围绕“明确交付目标与成功标准”产出可提交的本地文件、页面、配置、市场材料或反馈记录。",
+    "本环节说明中的核心交付物已经落到项目文件中。",
+    "已经运行最窄必要验证命令；如果无法运行，原因和替代检查已记录。",
+    "如果仍需后续推进，已经留下明确的下一次建议；如果不需要，Agent 或用户可以安全标记该环节完成。"
+  ],
+  "lastCompletionEvidence": [],
+  "entries": []
+}
