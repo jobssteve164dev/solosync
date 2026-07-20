@@ -13,8 +13,20 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "SCM Providers"],
-  "keywords": ["backup", "snapshot", "git", "restore", "nas", "qnap", "workspace", "ai-coding"],
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "backup",
+    "snapshot",
+    "git",
+    "restore",
+    "nas",
+    "qnap",
+    "workspace",
+    "ai-coding"
+  ],
   "activationEvents": [
     "onView:solosync.history",
     "onStartupFinished",
@@ -27,35 +39,92 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "solosync.configure", "title": "SoloSync: Choose Backup Location", "category": "SoloSync" },
-      { "command": "solosync.backupNow", "title": "SoloSync: Back Up Now", "category": "SoloSync", "icon": "$(cloud-upload)" },
-      { "command": "solosync.restoreSnapshot", "title": "SoloSync: Restore Snapshot", "category": "SoloSync" },
-      { "command": "solosync.restoreFile", "title": "SoloSync: Restore File", "category": "SoloSync" },
-      { "command": "solosync.verifySnapshot", "title": "SoloSync: Verify Snapshot", "category": "SoloSync" },
-      { "command": "solosync.refresh", "title": "SoloSync: Refresh History", "category": "SoloSync", "icon": "$(refresh)" }
+      {
+        "command": "solosync.configure",
+        "title": "SoloSync: Choose Backup Location",
+        "category": "SoloSync"
+      },
+      {
+        "command": "solosync.backupNow",
+        "title": "SoloSync: Back Up Now",
+        "category": "SoloSync",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "solosync.restoreSnapshot",
+        "title": "SoloSync: Restore Snapshot",
+        "category": "SoloSync"
+      },
+      {
+        "command": "solosync.restoreFile",
+        "title": "SoloSync: Restore File",
+        "category": "SoloSync"
+      },
+      {
+        "command": "solosync.verifySnapshot",
+        "title": "SoloSync: Verify Snapshot",
+        "category": "SoloSync"
+      },
+      {
+        "command": "solosync.refresh",
+        "title": "SoloSync: Refresh History",
+        "category": "SoloSync",
+        "icon": "$(refresh)"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
-        { "id": "solosync", "title": "SoloSync", "icon": "resources/activitybar.svg" }
+        {
+          "id": "solosync",
+          "title": "SoloSync",
+          "icon": "resources/activitybar.svg"
+        }
       ]
     },
     "views": {
       "solosync": [
-        { "id": "solosync.history", "name": "Backup History" }
+        {
+          "id": "solosync.history",
+          "name": "Backup History"
+        }
       ]
     },
     "menus": {
       "view/title": [
-        { "command": "solosync.backupNow", "when": "view == solosync.history", "group": "navigation@1" },
-        { "command": "solosync.refresh", "when": "view == solosync.history", "group": "navigation@2" }
+        {
+          "command": "solosync.backupNow",
+          "when": "view == solosync.history",
+          "group": "navigation@1"
+        },
+        {
+          "command": "solosync.refresh",
+          "when": "view == solosync.history",
+          "group": "navigation@2"
+        }
       ],
       "view/item/context": [
-        { "command": "solosync.restoreSnapshot", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@1" },
-        { "command": "solosync.restoreFile", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@2" },
-        { "command": "solosync.verifySnapshot", "when": "view == solosync.history && viewItem == solosync.snapshot", "group": "inline@3" }
+        {
+          "command": "solosync.restoreSnapshot",
+          "when": "view == solosync.history && viewItem == solosync.snapshot",
+          "group": "inline@1"
+        },
+        {
+          "command": "solosync.restoreFile",
+          "when": "view == solosync.history && viewItem == solosync.snapshot",
+          "group": "inline@2"
+        },
+        {
+          "command": "solosync.verifySnapshot",
+          "when": "view == solosync.history && viewItem == solosync.snapshot",
+          "group": "inline@3"
+        }
       ],
       "explorer/context": [
-        { "command": "solosync.backupNow", "when": "resourceScheme == file", "group": "navigation@50" }
+        {
+          "command": "solosync.backupNow",
+          "when": "resourceScheme == file",
+          "group": "navigation@50"
+        }
       ]
     },
     "configuration": {
@@ -79,8 +148,19 @@
         },
         "solosync.exclude": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["node_modules", ".git", "out", "dist", "build", ".next", ".cache", "*.log"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".git",
+            "out",
+            "dist",
+            "build",
+            ".next",
+            ".cache",
+            "*.log"
+          ],
           "description": "File or directory names excluded from snapshots."
         }
       }
