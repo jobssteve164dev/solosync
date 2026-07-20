@@ -167,16 +167,20 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && node --test test/*.test.js",
-    "package": "npx @vscode/vsce package"
+    "test": "npm run build && node --test test/*.test.js",
+    "package": "npx @vscode/vsce package",
+    "render-icon": "node scripts/render-icon.cjs",
+    "build": "npm run render-icon && npm run compile"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.6.0",
+    "pngjs": "^7.0.0",
     "typescript": "^5.7.0"
   }
 }

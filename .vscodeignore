@@ -3,6 +3,7 @@
 docs/**
 src/**
 test/**
+scripts/**
 .solopreneur/**
 AGENTS.md
 PROJECT_MEMORY.md
