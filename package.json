@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync - Local Code Snapshots",
   "description": "Automatically protect uncommitted and committed VS Code workspaces with restorable snapshots in storage you control.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -31,6 +31,7 @@
     "onView:solosync.history",
     "onStartupFinished",
     "onCommand:solosync.configure",
+    "onCommand:solosync.openSettings",
     "onCommand:solosync.backupNow",
     "onCommand:solosync.restoreSnapshot",
     "onCommand:solosync.restoreFile",
@@ -42,7 +43,14 @@
       {
         "command": "solosync.configure",
         "title": "SoloSync: Choose Backup Location",
-        "category": "SoloSync"
+        "category": "SoloSync",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "solosync.openSettings",
+        "title": "SoloSync: Open Settings",
+        "category": "SoloSync",
+        "icon": "$(gear)"
       },
       {
         "command": "solosync.backupNow",
@@ -89,17 +97,44 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "solosync.history",
+        "contents": "Protect this project with restorable backups.\n[Set Backup Location](command:solosync.configure)",
+        "when": "!solosync.hasBackupLocation"
+      },
+      {
+        "view": "solosync.history",
+        "contents": "The backup location is unavailable. Reconnect it or choose another folder.\n[Choose Another Location](command:solosync.configure)",
+        "when": "solosync.hasBackupLocation && !solosync.backupLocationAvailable"
+      },
+      {
+        "view": "solosync.history",
+        "contents": "Your backup location is ready.\n[Create First Backup](command:solosync.backupNow)\n[Change Backup Location](command:solosync.configure)",
+        "when": "solosync.hasBackupLocation && solosync.backupLocationAvailable"
+      }
+    ],
     "menus": {
       "view/title": [
         {
-          "command": "solosync.backupNow",
+          "command": "solosync.configure",
           "when": "view == solosync.history",
           "group": "navigation@1"
         },
         {
-          "command": "solosync.refresh",
+          "command": "solosync.backupNow",
           "when": "view == solosync.history",
           "group": "navigation@2"
+        },
+        {
+          "command": "solosync.refresh",
+          "when": "view == solosync.history",
+          "group": "navigation@3"
+        },
+        {
+          "command": "solosync.openSettings",
+          "when": "view == solosync.history",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
