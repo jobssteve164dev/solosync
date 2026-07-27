@@ -34,6 +34,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 
 ## Handoff Notes
 
+- `SZLK.solosync@0.0.4` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX.
 - `0.0.4` allows a dedicated backup folder inside a broader VS Code workspace and excludes that folder from snapshot scans and idle-backup triggers; only choosing an actual workspace root itself remains blocked.
 - `0.0.3` added sidebar setup and settings entry points, guided Google Drive desktop-folder / mounted NAS / local-drive choices, location availability validation, and recoverable empty states.
 - Native Google Drive OAuth and direct NAS credentials are still not implemented; `0.0.3` keeps the production filesystem-backend boundary and requires Drive desktop sync or an operating-system-mounted NAS share.
