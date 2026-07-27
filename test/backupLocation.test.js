@@ -16,16 +16,20 @@ test('accepts a writable backup folder outside the workspace', async () => {
   await validateBackupDirectory(backup, [{ name: 'workspace', path: workspace }]);
 });
 
-test('rejects folders inside the open workspace', async () => {
+test('allows a dedicated backup folder inside a broader workspace', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-location-'));
   const workspace = path.join(temp, 'workspace');
   const backup = path.join(workspace, 'backup');
   await mkdir(backup, { recursive: true });
 
-  await assert.rejects(
-    validateBackupDirectory(backup, [{ name: 'workspace', path: workspace }]),
-    /outside the open workspace/,
-  );
+  assert.equal(isDirectoryInsideWorkspace(backup, [{ name: 'workspace', path: workspace }]), true);
+  await validateBackupDirectory(backup, [{ name: 'workspace', path: workspace }]);
+});
+
+test('rejects using the open workspace itself as the backup folder', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'solosync-location-'));
+
+  await assert.rejects(validateBackupDirectory(workspace, [{ name: 'workspace', path: workspace }]), /workspace itself/);
 });
 
 test('rejects missing locations and files', async () => {

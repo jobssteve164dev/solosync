@@ -23,7 +23,7 @@ SoloSync never synchronizes remote deletions back into your workspace. The first
 3. Choose a local folder, mounted QNAP share, or another mounted NAS folder.
 4. Run **SoloSync: Back Up Now**.
 
-You can also configure this directly from the SoloSync sidebar: click the folder button, choose **Google Drive**, **NAS**, or **Local or external drive**, then select the destination folder. Google Drive must already be signed in and synchronized by Google Drive for desktop. A NAS share must already be mounted by your operating system. SoloSync checks that the selected folder is available, writable, and outside the open workspace before saving it.
+You can also configure this directly from the SoloSync sidebar: click the folder button, choose **Google Drive**, **NAS**, or **Local or external drive**, then select the destination folder. Google Drive must already be signed in and synchronized by Google Drive for desktop. A NAS share must already be mounted by your operating system. SoloSync checks that the selected folder is available and writable. The open workspace itself cannot be the backup folder; a dedicated backup folder inside a broader VS Code workspace is allowed and automatically excluded from snapshots.
 
 The gear button in the sidebar opens backup timing and exclusion settings. The sidebar shows the configured storage type and folder name, and provides a recovery action if the location becomes unavailable.
 

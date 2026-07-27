@@ -11,12 +11,13 @@ export const backupLocationLabels: Record<BackupLocationKind, string> = {
   local: 'Local or external drive',
 };
 
+export function isPathInsideDirectory(candidate: string, directory: string): boolean {
+  const relative = path.relative(path.resolve(directory), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 export function isDirectoryInsideWorkspace(directory: string, roots: WorkspaceRoot[]): boolean {
-  const resolvedDirectory = path.resolve(directory);
-  return roots.some((root) => {
-    const relative = path.relative(path.resolve(root.path), resolvedDirectory);
-    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-  });
+  return roots.some((root) => isPathInsideDirectory(directory, root.path));
 }
 
 export async function validateBackupDirectory(directory: string, roots: WorkspaceRoot[]): Promise<void> {
@@ -29,8 +30,8 @@ export async function validateBackupDirectory(directory: string, roots: Workspac
   if (!metadata.isDirectory()) {
     throw new Error('Choose a folder for SoloSync backups.');
   }
-  if (isDirectoryInsideWorkspace(directory, roots)) {
-    throw new Error('Choose a backup location outside the open workspace to prevent recursive backups.');
+  if (roots.some((root) => path.resolve(root.path) === path.resolve(directory))) {
+    throw new Error('Choose a backup folder instead of the open workspace itself.');
   }
   try {
     await access(directory, constants.R_OK);

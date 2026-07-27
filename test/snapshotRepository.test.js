@@ -41,3 +41,47 @@ test('project identifiers are stable regardless of root order', () => {
   const roots = [{ name: 'b', path: '/tmp/b' }, { name: 'a', path: '/tmp/a' }];
   assert.equal(projectIdFor(roots), projectIdFor([...roots].reverse()));
 });
+
+test('excludes a nested backup location from snapshot contents', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-nested-backup-'));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(workspace, 'backups');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+
+  const roots = [{ name: 'sample', path: workspace }];
+  const repository = new SnapshotRepository();
+  const manifest = await repository.create({
+    backupDirectory: backup,
+    projectId: projectIdFor(roots),
+    projectName: 'Sample',
+    roots,
+    excludes: [],
+    reason: 'Test',
+    git: { dirty: true },
+  });
+
+  assert.deepEqual(manifest.files.map((file) => file.path), ['source.txt']);
+});
+
+test('does not exclude source files when the backup location is an ancestor', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-parent-backup-'));
+  const workspace = path.join(temp, 'projects', 'workspace');
+  const backup = path.join(temp, 'projects');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+
+  const roots = [{ name: 'sample', path: workspace }];
+  const repository = new SnapshotRepository();
+  const manifest = await repository.create({
+    backupDirectory: backup,
+    projectId: projectIdFor(roots),
+    projectName: 'Sample',
+    roots,
+    excludes: [],
+    reason: 'Test',
+    git: { dirty: true },
+  });
+
+  assert.deepEqual(manifest.files.map((file) => file.path), ['source.txt']);
+});

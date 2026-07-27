@@ -1,6 +1,6 @@
 import path from 'node:path';
 import * as vscode from 'vscode';
-import { BackupLocationKind, backupLocationLabels, validateBackupDirectory } from './backupLocation';
+import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory } from './backupLocation';
 import { isBackupWorthyGitOperation, readGitState } from './git';
 import { HistoryTreeProvider, SnapshotItem } from './historyTree';
 import { projectIdFor, SnapshotRepository } from './snapshotRepository';
@@ -144,7 +144,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
-  const scheduleIdleBackup = (): void => {
+  const scheduleIdleBackup = (changed?: vscode.Uri): void => {
+    const directory = backupDirectory();
+    if (changed?.scheme === 'file' && directory && isPathInsideDirectory(changed.fsPath, directory)) return;
     if (idleTimer) clearTimeout(idleTimer);
     const minutes = config().get<number>('idleBackupMinutes', 10);
     if (minutes <= 0) return;

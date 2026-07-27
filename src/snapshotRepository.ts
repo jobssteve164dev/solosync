@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isPathInsideDirectory } from './backupLocation';
 import { SnapshotFile, SnapshotManifest, WorkspaceRoot } from './types';
 
 export interface CreateSnapshotOptions {
@@ -39,14 +40,15 @@ async function sha256(filePath: string): Promise<string> {
   return hash.digest('hex');
 }
 
-async function collectFiles(root: WorkspaceRoot, excludes: string[]): Promise<Array<{ absolute: string; relative: string }>> {
+async function collectFiles(root: WorkspaceRoot, excludes: string[], backupDirectory: string): Promise<Array<{ absolute: string; relative: string }>> {
   const files: Array<{ absolute: string; relative: string }> = [];
+  const nestedBackupDirectory = isPathInsideDirectory(backupDirectory, root.path) ? backupDirectory : undefined;
   async function walk(current: string): Promise<void> {
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root.path, absolute);
-      if (shouldExclude(relative, entry.name, excludes) || entry.isSymbolicLink()) {
+      if ((nestedBackupDirectory && isPathInsideDirectory(absolute, nestedBackupDirectory)) || shouldExclude(relative, entry.name, excludes) || entry.isSymbolicLink()) {
         continue;
       }
       if (entry.isDirectory()) {
@@ -90,7 +92,7 @@ export class SnapshotRepository {
     try {
       for (const root of options.roots) {
         const rootName = safeSegment(root.name);
-        for (const file of await collectFiles(root, options.excludes)) {
+        for (const file of await collectFiles(root, options.excludes, options.backupDirectory)) {
           const destination = path.join(stagingDirectory, 'files', rootName, file.relative);
           const copied = await copyConsistent(file.absolute, destination);
           totalBytes += copied.size;

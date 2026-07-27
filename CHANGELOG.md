@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.4
+
+- Allow dedicated backup folders inside a broader VS Code workspace while excluding them from snapshot scans and idle-backup triggers.
+- Only reject the open workspace directory itself as a backup destination.
+
 ## 0.0.3
 
 - Add a visible backup-location setup entry and Settings button to the SoloSync sidebar.
