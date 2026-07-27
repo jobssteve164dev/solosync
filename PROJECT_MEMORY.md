@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.2` released to Visual Studio Marketplace and Open VSX with the corrected full-color marketplace icon.
+- Current stage: Version `0.0.3` released to Visual Studio Marketplace and Open VSX with guided sidebar backup-location setup.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -34,5 +34,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 
 ## Handoff Notes
 
-- `SZLK.solosync@0.0.2` is publicly verified on Visual Studio Marketplace and Open VSX; icon rendering is generated with resvg and protected by a pixel-level regression test.
+- `SZLK.solosync@0.0.3` is publicly verified on Visual Studio Marketplace and Open VSX. It adds sidebar setup and settings entry points, guided Google Drive desktop-folder / mounted NAS / local-drive choices, location availability validation, and recoverable empty states.
+- Native Google Drive OAuth and direct NAS credentials are still not implemented; `0.0.3` keeps the production filesystem-backend boundary and requires Drive desktop sync or an operating-system-mounted NAS share.
+- Icon rendering is generated with resvg and protected by a pixel-level regression test.
 - Continue from `/home/ubuntu/project/solosync`; do not recreate the project under `.solomap-global/memory/inbox`.
