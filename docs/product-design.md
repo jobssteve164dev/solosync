@@ -17,11 +17,11 @@
 
 ### 首次使用
 
-1. 用户点击侧栏中的“开始备份”。
-2. 选择 Google Drive 或 QNAP NAS。
-3. 完成 Google 授权，或填写 NAS 地址、用户名并选择 SSH 私钥。
-4. 插件自动测试连接，显示目标文件夹与可用空间（协议支持时）。
-5. 用户确认默认排除项后，点击“创建首个备份”。
+1. 用户点击侧栏中的“设置”。
+2. 明确选择要保护的项目文件夹；插件不得用更宽的 VS Code 工作区静默替代。
+3. 选择 Google Drive、QNAP NAS 或本地目录作为备份位置。
+4. 插件自动测试源目录与目标位置，显示当前选择。
+5. 用户点击“创建首个备份”；扫描和复制阶段显示文件进度并可随时取消，取消后不保留未完成快照。
 
 不要让用户选择“适配器、传输模式、manifest、增量算法”等内部概念。设置页只暴露会改变结果的选择：备份位置、备份时机、保留数量、排除规则、是否加密。
 
@@ -116,7 +116,7 @@ VS Code 命令/侧栏/状态栏
 ### 模块职责
 
 - `BackupService`：唯一编排入口，管理排队、防抖、取消、重试与结果状态。
-- `WorkspaceScanner`：处理多根工作区、排除规则、符号链接策略和文件变化检测。
+- `WorkspaceScanner`：只扫描用户明确选择的项目文件夹，并处理排除规则、符号链接策略和文件变化检测。
 - `SnapshotBuilder`：流式生成 manifest 与压缩包，避免把整个项目读入内存。
 - `SnapshotRepository`：负责快照命名、原子发布、列表、读取与保留策略。
 - `RestoreService`：下载、校验、预览冲突、恢复到新目录或受控覆盖。
@@ -180,13 +180,13 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 
 ### 第一阶段：可用首版
 
-- VS Code 桌面扩展骨架、单根/多根工作区扫描、排除规则。
+- VS Code 桌面扩展骨架、用户选择的单项目目录扫描、排除规则。
 - 完整快照、manifest、SHA-256、恢复到新目录。
 - Google Drive `drive.file` + resumable upload。
 - QNAP SFTP + host key 固定。
 - 手动备份、空闲自动备份、历史列表、连接测试、取消与重试。
 
-验收标准：在 Windows、macOS、Linux 各完成一次 1 GB 项目的中断续传；从 Google Drive 和 QNAP 各恢复到空目录，逐文件哈希与原工作区一致；多根工作区均被包含；凭据不出现在设置 JSON、日志和备份内容中。
+验收标准：在 Windows、macOS、Linux 各完成一次 1 GB 项目的中断续传；从 Google Drive 和 QNAP 各恢复到空目录，逐文件哈希与原项目一致；宽工作区下只包含用户选择的项目目录；取消后不发布快照且不残留本次 staging；凭据不出现在设置 JSON、日志和备份内容中。
 
 ### 第二阶段：可靠性与空间效率
 
@@ -226,4 +226,3 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 - [VS Code：Workspace Trust](https://code.visualstudio.com/api/extension-guides/workspace-trust)
 - [QTS 5.2 User Guide：WebDAV 与服务配置](https://docs.qnap.com/operating-system/qts/5.2.x/qts5.2.x-ug-en-us.pdf)
 - [rclone GitHub 仓库](https://github.com/rclone/rclone)
-

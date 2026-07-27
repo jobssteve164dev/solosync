@@ -1,6 +1,6 @@
 # SoloSync
 
-SoloSync protects the code that Git has not protected yet. It creates restorable workspace snapshots in a local folder or a NAS share you already mounted on your computer.
+SoloSync protects the code that Git has not protected yet. It creates restorable snapshots of the project folder you choose in a local folder or a NAS share you already mounted on your computer.
 
 ## What the first release does
 
@@ -12,20 +12,21 @@ SoloSync protects the code that Git has not protected yet. It creates restorable
 - Restores a whole snapshot into a new folder without overwriting the current workspace.
 - Restores one selected file to a location you choose.
 - Verifies every restored snapshot with SHA-256 hashes.
-- Supports multi-root workspaces.
+- Backs up only the project folder you explicitly choose, even when VS Code has a broader parent folder open.
+- Shows scanning and copying progress with a Cancel button that discards the incomplete snapshot.
 
 SoloSync never synchronizes remote deletions back into your workspace. The first release also never deletes old snapshots automatically.
 
 ## Start protecting a project
 
-1. Open a local project folder in VS Code.
-2. Run **SoloSync: Choose Backup Location**.
-3. Choose a local folder, mounted QNAP share, or another mounted NAS folder.
-4. Run **SoloSync: Back Up Now**.
+1. Open the SoloSync sidebar and run **SoloSync: Setup**.
+2. Choose the project folder you want SoloSync to protect.
+3. Choose a local folder, mounted QNAP share, or another mounted NAS folder for snapshots.
+4. Run **SoloSync: Back Up Now**. The progress notification can cancel an incorrect or unexpectedly large backup.
 
-You can also configure this directly from the SoloSync sidebar: click the folder button, choose **Google Drive**, **NAS**, or **Local or external drive**, then select the destination folder. Google Drive must already be signed in and synchronized by Google Drive for desktop. A NAS share must already be mounted by your operating system. SoloSync checks that the selected folder is available and writable. The open workspace itself cannot be the backup folder; a dedicated backup folder inside a broader VS Code workspace is allowed and automatically excluded from snapshots.
+The sidebar Setup button keeps the two choices separate: **Project folder** is what SoloSync backs up, while **Backup location** is where snapshots are stored. Google Drive must already be signed in and synchronized by Google Drive for desktop. A NAS share must already be mounted by your operating system. SoloSync checks that both folders are available and that the backup location is writable. A backup folder inside the selected project is automatically excluded from snapshots.
 
-The gear button in the sidebar opens backup timing and exclusion settings. The sidebar shows the configured storage type and folder name, and provides a recovery action if the location becomes unavailable.
+Setup also opens backup timing and exclusion options. The sidebar shows the selected project, storage type, and destination folder, and provides recovery actions if either location becomes unavailable.
 
 Future snapshots appear in the SoloSync activity bar. Git commit backups are enabled by default. Idle backups default to ten minutes and can be changed in VS Code Settings.
 

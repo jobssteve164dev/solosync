@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.4` corrects backup-location validation for broad VS Code workspace roots while retaining guided sidebar setup.
+- Current stage: Version `0.0.5` requires an explicit project source folder and adds cancellable, observable backups with precise staging cleanup.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -23,6 +23,8 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Snapshot creation, listing, verification, and restore live in `src/snapshotRepository.ts`.
 - Git state and commit-trigger classification live in `src/git.ts`.
 - VS Code lifecycle, commands, automatic triggers, and user interaction are composed in `src/extension.ts`.
+- The backup source is the single project folder explicitly selected by the user; SoloSync does not infer or fall back to the VS Code workspace root.
+- Snapshot scanning and copying accept cancellation and report progress. Cancellation or failure removes only the staging directory created by that run and never publishes it as a snapshot.
 - Native Google Drive OAuth, SFTP, WebDAV, encryption, and incremental content-addressed storage are later milestones documented in `docs/product-design.md`.
 
 ## Verification

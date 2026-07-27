@@ -44,3 +44,20 @@ export async function validateBackupDirectory(directory: string, roots: Workspac
     throw new Error('SoloSync cannot write to this location. Check its permissions and try again.');
   }
 }
+
+export async function validateSourceDirectory(directory: string): Promise<void> {
+  let metadata;
+  try {
+    metadata = await stat(directory);
+  } catch {
+    throw new Error('The project folder is unavailable. Reconnect it or choose another folder.');
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error('Choose a project folder for SoloSync to protect.');
+  }
+  try {
+    await access(directory, constants.R_OK);
+  } catch {
+    throw new Error('SoloSync cannot read this project folder. Check its permissions and try again.');
+  }
+}

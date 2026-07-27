@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.5
+
+- Require an explicit project-folder selection and never fall back to a broader VS Code workspace.
+- Show scanning and copying progress with a native Cancel button.
+- Remove the current staging snapshot when a backup is canceled or fails, without publishing it.
+- Ignore file changes outside the selected project and add `.pnpm-store` to the default exclusions.
+
 ## 0.0.4
 
 - Allow dedicated backup folders inside a broader VS Code workspace while excluding them from snapshot scans and idle-backup triggers.

@@ -3,7 +3,7 @@ const { mkdtemp, mkdir, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { isDirectoryInsideWorkspace, validateBackupDirectory } = require('../out/backupLocation.js');
+const { isDirectoryInsideWorkspace, validateBackupDirectory, validateSourceDirectory } = require('../out/backupLocation.js');
 
 test('accepts a writable backup folder outside the workspace', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-location-'));
@@ -39,13 +39,19 @@ test('rejects missing locations and files', async () => {
 
   await assert.rejects(validateBackupDirectory(path.join(temp, 'missing'), []), /unavailable/);
   await assert.rejects(validateBackupDirectory(file, []), /Choose a folder/);
+  await assert.rejects(validateSourceDirectory(path.join(temp, 'missing')), /project folder is unavailable/);
+  await assert.rejects(validateSourceDirectory(file), /Choose a project folder/);
 });
 
 test('sidebar exposes setup, settings, and recovery entry points', () => {
   const manifest = require('../package.json');
   const titleCommands = manifest.contributes.menus['view/title'].map((item) => item.command);
-  assert.ok(titleCommands.includes('solosync.configure'));
-  assert.ok(titleCommands.includes('solosync.openSettings'));
+  assert.ok(titleCommands.includes('solosync.setup'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.configureSource'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.cancelBackup'));
+  assert.ok(manifest.contributes.menus['view/title'].some((item) => item.command === 'solosync.cancelBackup' && item.when.includes('solosync.backupRunning')));
+  assert.ok(manifest.contributes.configuration.properties['solosync.sourceDirectory']);
+  assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.hasSourceDirectory')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.hasBackupLocation')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.backupLocationAvailable')));
 });

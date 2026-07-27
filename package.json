@@ -1,8 +1,8 @@
 {
   "name": "solosync",
   "displayName": "SoloSync - Local Code Snapshots",
-  "description": "Automatically protect uncommitted and committed VS Code workspaces with restorable snapshots in storage you control.",
-  "version": "0.0.4",
+  "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
+  "version": "0.0.5",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -30,9 +30,12 @@
   "activationEvents": [
     "onView:solosync.history",
     "onStartupFinished",
+    "onCommand:solosync.setup",
+    "onCommand:solosync.configureSource",
     "onCommand:solosync.configure",
     "onCommand:solosync.openSettings",
     "onCommand:solosync.backupNow",
+    "onCommand:solosync.cancelBackup",
     "onCommand:solosync.restoreSnapshot",
     "onCommand:solosync.restoreFile",
     "onCommand:solosync.verifySnapshot"
@@ -40,6 +43,18 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "solosync.setup",
+        "title": "SoloSync: Setup",
+        "category": "SoloSync",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "solosync.configureSource",
+        "title": "SoloSync: Choose Project Folder",
+        "category": "SoloSync",
+        "icon": "$(root-folder)"
+      },
       {
         "command": "solosync.configure",
         "title": "SoloSync: Choose Backup Location",
@@ -57,6 +72,12 @@
         "title": "SoloSync: Back Up Now",
         "category": "SoloSync",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "solosync.cancelBackup",
+        "title": "SoloSync: Cancel Backup",
+        "category": "SoloSync",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "solosync.restoreSnapshot",
@@ -100,41 +121,51 @@
     "viewsWelcome": [
       {
         "view": "solosync.history",
-        "contents": "Protect this project with restorable backups.\n[Set Backup Location](command:solosync.configure)",
-        "when": "!solosync.hasBackupLocation"
+        "contents": "Choose the project folder SoloSync should protect.\n[Choose Project Folder](command:solosync.configureSource)",
+        "when": "!solosync.hasSourceDirectory"
+      },
+      {
+        "view": "solosync.history",
+        "contents": "The selected project folder is unavailable.\n[Choose Another Project Folder](command:solosync.configureSource)",
+        "when": "solosync.hasSourceDirectory && !solosync.sourceDirectoryAvailable"
+      },
+      {
+        "view": "solosync.history",
+        "contents": "Choose where SoloSync should store backups.\n[Set Backup Location](command:solosync.configure)",
+        "when": "solosync.hasSourceDirectory && solosync.sourceDirectoryAvailable && !solosync.hasBackupLocation"
       },
       {
         "view": "solosync.history",
         "contents": "The backup location is unavailable. Reconnect it or choose another folder.\n[Choose Another Location](command:solosync.configure)",
-        "when": "solosync.hasBackupLocation && !solosync.backupLocationAvailable"
+        "when": "solosync.hasSourceDirectory && solosync.sourceDirectoryAvailable && solosync.hasBackupLocation && !solosync.backupLocationAvailable"
       },
       {
         "view": "solosync.history",
-        "contents": "Your backup location is ready.\n[Create First Backup](command:solosync.backupNow)\n[Change Backup Location](command:solosync.configure)",
-        "when": "solosync.hasBackupLocation && solosync.backupLocationAvailable"
+        "contents": "SoloSync is ready.\n[Create First Backup](command:solosync.backupNow)\n[Change Setup](command:solosync.setup)",
+        "when": "solosync.hasSourceDirectory && solosync.sourceDirectoryAvailable && solosync.hasBackupLocation && solosync.backupLocationAvailable"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "solosync.configure",
+          "command": "solosync.setup",
           "when": "view == solosync.history",
           "group": "navigation@1"
         },
         {
           "command": "solosync.backupNow",
-          "when": "view == solosync.history",
+          "when": "view == solosync.history && !solosync.backupRunning",
+          "group": "navigation@2"
+        },
+        {
+          "command": "solosync.cancelBackup",
+          "when": "view == solosync.history && solosync.backupRunning",
           "group": "navigation@2"
         },
         {
           "command": "solosync.refresh",
           "when": "view == solosync.history",
           "group": "navigation@3"
-        },
-        {
-          "command": "solosync.openSettings",
-          "when": "view == solosync.history",
-          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -165,6 +196,12 @@
     "configuration": {
       "title": "SoloSync",
       "properties": {
+        "solosync.sourceDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "Project folder SoloSync protects. Use 'SoloSync: Choose Project Folder' instead of editing this manually."
+        },
         "solosync.backupDirectory": {
           "type": "string",
           "default": "",
@@ -194,6 +231,7 @@
             "build",
             ".next",
             ".cache",
+            ".pnpm-store",
             "*.log"
           ],
           "description": "File or directory names excluded from snapshots."
