@@ -3,3 +3,6 @@ out/
 *.vsix
 .vscode-test/
 coverage/
+
+# SoloMap runtime state
+/.solopreneur/
