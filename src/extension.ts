@@ -1,12 +1,18 @@
+import { randomUUID } from 'node:crypto';
+import { rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory, validateSourceDirectory } from './backupLocation';
 import { isBackupWorthyGitOperation, readGitState } from './git';
 import { HistoryTreeProvider, SnapshotItem } from './historyTree';
 import { projectIdFor, SnapshotCancelledError, SnapshotRepository } from './snapshotRepository';
+import { LocalFileSystemProvider, normalizeQnapWebDavUrl, QnapWebDavConnection, QnapWebDavProvider, StorageProvider } from './storageProvider';
 import { SnapshotManifest, WorkspaceRoot } from './types';
 
 const repository = new SnapshotRepository();
+const qnapConnectionKey = 'qnapWebDavConnection';
+const qnapPasswordKey = 'solosync.qnapWebDav.password';
+const projectAssociationsKey = 'projectAssociations';
 
 function sourceDirectory(): string | undefined {
   const value = config().get<string>('sourceDirectory', '').trim();
@@ -31,6 +37,58 @@ function backupDirectory(): string | undefined {
   return value || undefined;
 }
 
+function qnapConnection(context: vscode.ExtensionContext): QnapWebDavConnection | undefined {
+  const value = context.globalState.get<Partial<QnapWebDavConnection>>(qnapConnectionKey);
+  return value && typeof value.baseUrl === 'string' && typeof value.username === 'string'
+    ? { baseUrl: value.baseUrl, username: value.username }
+    : undefined;
+}
+
+function hasConfiguredBackupLocation(context: vscode.ExtensionContext): boolean {
+  return backupLocationKind(context) === 'qnap' ? Boolean(qnapConnection(context)) : Boolean(backupDirectory());
+}
+
+async function configuredProvider(context: vscode.ExtensionContext): Promise<StorageProvider | undefined> {
+  if (backupLocationKind(context) === 'qnap') {
+    const connection = qnapConnection(context);
+    const password = await context.secrets.get(qnapPasswordKey);
+    if (!connection || !password) return undefined;
+    return QnapWebDavProvider.create(connection, password);
+  }
+  const directory = backupDirectory();
+  return directory ? new LocalFileSystemProvider(directory) : undefined;
+}
+
+function associationPath(directory: string): string {
+  const resolved = path.resolve(directory);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function associateProject(context: vscode.ExtensionContext, directory: string, projectId: string): Promise<void> {
+  const associations = context.globalState.get<Record<string, string>>(projectAssociationsKey, {});
+  await context.globalState.update(projectAssociationsKey, { ...associations, [associationPath(directory)]: projectId });
+}
+
+async function resolveProjectId(context: vscode.ExtensionContext, provider: StorageProvider, roots: WorkspaceRoot[]): Promise<string> {
+  const directory = roots[0]?.path;
+  if (!directory) throw new Error('Choose the project folder SoloSync should protect.');
+  const associations = context.globalState.get<Record<string, string>>(projectAssociationsKey, {});
+  const existing = associations[associationPath(directory)];
+  if (existing) return existing;
+  const legacy = projectIdFor(roots);
+  const projectId = await repository.projectExists(provider, legacy) ? legacy : randomUUID().replace(/-/g, '').slice(0, 16);
+  await associateProject(context, directory, projectId);
+  return projectId;
+}
+
+async function validateProvider(provider: StorageProvider, roots: WorkspaceRoot[]): Promise<void> {
+  if (provider.localRoot) {
+    await validateBackupDirectory(provider.localRoot, roots);
+  } else {
+    await provider.validate();
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const tree = new HistoryTreeProvider();
   const treeView = vscode.window.createTreeView('solosync.history', { treeDataProvider: tree });
@@ -49,59 +107,71 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const refresh = async (): Promise<void> => {
     const roots = protectedRoots();
     const source = sourceDirectory();
-    const directory = backupDirectory();
+    const hasLocation = hasConfiguredBackupLocation(context);
     await vscode.commands.executeCommand('setContext', 'solosync.hasSourceDirectory', Boolean(source));
-    await vscode.commands.executeCommand('setContext', 'solosync.hasBackupLocation', Boolean(directory));
-    if (!source) {
-      tree.setSnapshots([]);
-      treeView.message = undefined;
-      status.command = 'solosync.configureSource';
-      status.text = '$(root-folder) SoloSync: Choose project';
-      status.tooltip = 'Choose the project folder SoloSync should protect';
-      await vscode.commands.executeCommand('setContext', 'solosync.sourceDirectoryAvailable', false);
-      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
-      return;
-    }
-    try {
-      await validateSourceDirectory(source);
-      await vscode.commands.executeCommand('setContext', 'solosync.sourceDirectoryAvailable', true);
-    } catch {
-      tree.setSnapshots([]);
-      treeView.message = undefined;
-      status.command = 'solosync.configureSource';
-      status.text = '$(warning) SoloSync: Project unavailable';
-      status.tooltip = 'Reconnect the project folder or choose another one';
-      await vscode.commands.executeCommand('setContext', 'solosync.sourceDirectoryAvailable', false);
-      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
-      return;
-    }
-    if (!directory) {
-      tree.setSnapshots([]);
-      treeView.message = undefined;
-      status.command = 'solosync.configure';
-      status.text = '$(gear) SoloSync: Set up';
-      status.tooltip = 'Choose where SoloSync stores backups';
-      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
-      return;
-    }
-    try {
-      await validateBackupDirectory(directory, roots);
-      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', true);
-      const kind = backupLocationKind(context);
-      treeView.message = `${roots[0].name} → ${kind ? backupLocationLabels[kind] : 'Backup folder'} · ${path.basename(directory) || directory}`;
-      status.command = 'solosync.backupNow';
-      if (status.text === '$(root-folder) SoloSync: Choose project' || status.text === '$(gear) SoloSync: Set up' || status.text === '$(warning) SoloSync: Project unavailable' || status.text === '$(warning) SoloSync: Location unavailable') {
-        status.text = '$(archive) SoloSync';
-        status.tooltip = `Back up ${roots[0].name}`;
+    await vscode.commands.executeCommand('setContext', 'solosync.hasBackupLocation', hasLocation);
+
+    let sourceAvailable = false;
+    if (source) {
+      try {
+        await validateSourceDirectory(source);
+        sourceAvailable = true;
+      } catch {
+        sourceAvailable = false;
       }
-      tree.setSnapshots(await repository.list(directory, projectIdFor(roots)));
+    }
+    await vscode.commands.executeCommand('setContext', 'solosync.sourceDirectoryAvailable', sourceAvailable);
+
+    let provider: StorageProvider | undefined;
+    try {
+      provider = await configuredProvider(context);
+      if (!provider) throw new Error('Choose where SoloSync stores backups.');
+      await validateProvider(provider, sourceAvailable ? roots : []);
+      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', true);
     } catch {
-      tree.setSnapshots([]);
-      treeView.message = undefined;
+      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
+      provider = undefined;
+    }
+
+    tree.setSnapshots([]);
+    treeView.message = undefined;
+    if (!sourceAvailable) {
+      if (provider) {
+        treeView.message = `Backups available on ${provider.displayName}`;
+        status.command = 'solosync.browseBackups';
+        status.text = '$(history) SoloSync: Browse backups';
+        status.tooltip = 'Browse and restore an existing backup';
+      } else if (source) {
+        status.command = 'solosync.configureSource';
+        status.text = '$(warning) SoloSync: Project unavailable';
+        status.tooltip = 'Reconnect the project folder or browse an existing backup';
+      } else {
+        status.command = 'solosync.configureSource';
+        status.text = '$(root-folder) SoloSync: Choose project';
+        status.tooltip = 'Choose a project or browse an existing backup';
+      }
+      return;
+    }
+    if (!provider) {
+      status.command = 'solosync.configure';
+      status.text = hasLocation ? '$(warning) SoloSync: Location unavailable' : '$(gear) SoloSync: Set up';
+      status.tooltip = hasLocation ? 'Reconnect the backup location or choose another one' : 'Choose where SoloSync stores backups';
+      return;
+    }
+    try {
+      const projectId = await resolveProjectId(context, provider, roots);
+      const snapshots = await repository.list(provider, projectId);
+      const kind = backupLocationKind(context);
+      treeView.message = `${roots[0].name} → ${kind ? backupLocationLabels[kind] : 'Backup folder'} · ${provider.displayName}`;
+      status.command = 'solosync.backupNow';
+      status.text = '$(archive) SoloSync';
+      status.tooltip = `Back up ${roots[0].name}`;
+      tree.setSnapshots(snapshots);
+    } catch {
+      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
       status.command = 'solosync.configure';
       status.text = '$(warning) SoloSync: Location unavailable';
-      status.tooltip = 'Reconnect the backup location or choose another folder';
-      await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
+      status.tooltip = 'Reconnect the backup location or choose another one';
     }
   };
 
@@ -116,13 +186,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!selected) return undefined;
         roots = protectedRoots();
       }
-      let directory = backupDirectory();
-      if (!directory) {
-        directory = await chooseBackupDirectory(context, roots);
-      }
-      if (!directory) return undefined;
+      let provider: StorageProvider | undefined;
       try {
-        await validateBackupDirectory(directory, roots);
+        provider = await configuredProvider(context);
+        if (!provider) provider = await chooseBackupLocation(context, roots);
+        if (!provider) return undefined;
+        await validateProvider(provider, roots);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         void vscode.window.showErrorMessage(message, 'Set Backup Location').then((action) => {
@@ -130,6 +199,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         });
         return undefined;
       }
+      if (!provider) return undefined;
       if (!vscode.workspace.isTrusted) {
         void vscode.window.showWarningMessage('Trust this workspace before creating a SoloSync backup.');
         return undefined;
@@ -138,6 +208,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       status.text = '$(sync~spin) SoloSync: Backing up';
       try {
         const git = await readGitState(roots);
+        const projectId = await resolveProjectId(context, provider, roots);
         const manifest = await vscode.window.withProgress({
           location: vscode.ProgressLocation.Notification,
           title: `SoloSync is protecting ${projectName(roots)}`,
@@ -152,8 +223,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           let lastCompleted = 0;
           try {
             return await repository.create({
-              backupDirectory: directory!,
-              projectId: projectIdFor(roots),
+              provider,
+              projectId,
               projectName: projectName(roots),
               roots,
               excludes: config().get<string[]>('exclude', []),
@@ -207,7 +278,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const scheduleIdleBackup = (changed?: vscode.Uri): void => {
-    const directory = backupDirectory();
+    const directory = backupLocationKind(context) === 'qnap' ? undefined : backupDirectory();
     if (changed?.scheme === 'file' && directory && isPathInsideDirectory(changed.fsPath, directory)) return;
     const roots = protectedRoots();
     if (changed?.scheme === 'file' && !roots.some((root) => isPathInsideDirectory(changed.fsPath, root.path))) return;
@@ -246,7 +317,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('solosync.setup', async () => {
       const action = await vscode.window.showQuickPick([
         { label: '$(root-folder) Project folder', description: sourceDirectory() ? path.basename(sourceDirectory()!) : 'Not selected', command: 'solosync.configureSource' },
-        { label: '$(folder-opened) Backup location', description: backupDirectory() ? path.basename(backupDirectory()!) : 'Not selected', command: 'solosync.configure' },
+        { label: '$(folder-opened) Backup location', description: backupLocationDescription(context), command: 'solosync.configure' },
+        { label: '$(history) Browse backups', description: 'Restore without the original project', command: 'solosync.browseBackups' },
         { label: '$(gear) Backup options', description: 'Timing and exclusions', command: 'solosync.openSettings' },
       ], { title: 'SoloSync Setup', placeHolder: 'What would you like to configure?' });
       if (action) await vscode.commands.executeCommand(action.command);
@@ -257,28 +329,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       lastHead = undefined;
       await context.workspaceState.update('lastObservedHead', undefined);
       await refresh();
-      if (!backupDirectory()) await vscode.commands.executeCommand('solosync.configure');
+      if (!hasConfiguredBackupLocation(context)) await vscode.commands.executeCommand('solosync.configure');
     }),
     vscode.commands.registerCommand('solosync.configure', async () => {
-      let roots = protectedRoots();
-      if (roots.length === 0) {
-        const source = await chooseSourceDirectory();
-        if (!source) return;
-        roots = protectedRoots();
-      }
-      const selected = await chooseBackupDirectory(context, roots);
-      if (!selected) return;
+      const provider = await chooseBackupLocation(context, protectedRoots());
+      if (!provider) return;
       await refresh();
-      const action = await vscode.window.showInformationMessage('Backup location is ready.', 'Back Up Now');
+      const actions = protectedRoots().length > 0 ? ['Back Up Now', 'Browse Backups'] : ['Browse Backups'];
+      const action = await vscode.window.showInformationMessage('Backup location is ready.', ...actions);
       if (action === 'Back Up Now') await backup('Manual backup');
+      if (action === 'Browse Backups') await browseBackups(context);
     }),
     vscode.commands.registerCommand('solosync.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:SZLK.solosync')),
     vscode.commands.registerCommand('solosync.backupNow', () => backup('Manual backup')),
     vscode.commands.registerCommand('solosync.cancelBackup', () => activeBackupController?.abort()),
     vscode.commands.registerCommand('solosync.refresh', refresh),
-    vscode.commands.registerCommand('solosync.restoreSnapshot', async (item?: SnapshotItem) => restoreSnapshot(await pickSnapshot(item, tree), backupDirectory())),
-    vscode.commands.registerCommand('solosync.restoreFile', async (item?: SnapshotItem) => restoreFile(await pickSnapshot(item, tree), backupDirectory())),
-    vscode.commands.registerCommand('solosync.verifySnapshot', async (item?: SnapshotItem) => verifySnapshot(await pickSnapshot(item, tree), backupDirectory())),
+    vscode.commands.registerCommand('solosync.browseBackups', () => browseBackups(context)),
+    vscode.commands.registerCommand('solosync.restoreSnapshot', async (item?: SnapshotItem) => {
+      const provider = await configuredProvider(context);
+      if (provider) await restoreSnapshot(await pickSnapshot(item, tree, context, provider), provider, context);
+    }),
+    vscode.commands.registerCommand('solosync.restoreFile', async (item?: SnapshotItem) => {
+      const provider = await configuredProvider(context);
+      if (provider) await restoreFile(await pickSnapshot(item, tree, context, provider), provider);
+    }),
+    vscode.commands.registerCommand('solosync.verifySnapshot', async (item?: SnapshotItem) => {
+      const provider = await configuredProvider(context);
+      if (provider) await verifySnapshot(await pickSnapshot(item, tree, context, provider), provider);
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solosync.sourceDirectory')) {
         lastHead = undefined;
@@ -318,11 +396,17 @@ async function chooseSourceDirectory(): Promise<string | undefined> {
 
 interface BackupLocationOption extends vscode.QuickPickItem {
   locationKind: BackupLocationKind;
-  pickerTitle: string;
+  pickerTitle?: string;
 }
 
-async function chooseBackupDirectory(context: vscode.ExtensionContext, roots: WorkspaceRoot[]): Promise<string | undefined> {
+async function chooseBackupLocation(context: vscode.ExtensionContext, roots: WorkspaceRoot[]): Promise<StorageProvider | undefined> {
   const option = await vscode.window.showQuickPick<BackupLocationOption>([
+    {
+      locationKind: 'qnap',
+      label: '$(server) QNAP NAS',
+      description: 'Connect with your NAS address',
+      detail: 'Back up directly to a QNAP shared folder over HTTPS.',
+    },
     {
       locationKind: 'googleDrive',
       label: '$(cloud) Google Drive',
@@ -351,6 +435,7 @@ async function chooseBackupDirectory(context: vscode.ExtensionContext, roots: Wo
     matchOnDetail: true,
   });
   if (!option) return undefined;
+  if (option.locationKind === 'qnap') return configureQnap(context);
   const currentDirectory = backupDirectory();
   const picked = await vscode.window.showOpenDialog({
     canSelectFiles: false,
@@ -358,7 +443,7 @@ async function chooseBackupDirectory(context: vscode.ExtensionContext, roots: Wo
     canSelectMany: false,
     defaultUri: currentDirectory ? vscode.Uri.file(currentDirectory) : undefined,
     openLabel: 'Use This Folder',
-    title: option.pickerTitle,
+    title: option.pickerTitle ?? 'Choose a backup folder',
   });
   const selected = picked?.[0]?.fsPath;
   if (!selected) return undefined;
@@ -371,20 +456,88 @@ async function chooseBackupDirectory(context: vscode.ExtensionContext, roots: Wo
   }
   await context.globalState.update('backupLocationKind', option.locationKind);
   await config().update('backupDirectory', selected, vscode.ConfigurationTarget.Global);
-  return selected;
+  return new LocalFileSystemProvider(selected);
+}
+
+async function configureQnap(context: vscode.ExtensionContext): Promise<StorageProvider | undefined> {
+  const current = qnapConnection(context);
+  const acknowledgement = await vscode.window.showWarningMessage(
+    'SoloSync uses HTTPS for transfer, but this version stores readable files on the NAS. Review whether secrets such as .env files should be excluded.',
+    { modal: true },
+    'Continue',
+  );
+  if (acknowledgement !== 'Continue') return undefined;
+  const baseUrl = await vscode.window.showInputBox({
+    title: 'Connect QNAP NAS',
+    prompt: 'Enter the HTTPS address of the shared folder where SoloSync should store backups.',
+    placeHolder: 'https://backup.example.com/Backups',
+    value: current?.baseUrl,
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      try {
+        normalizeQnapWebDavUrl(value);
+        return undefined;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
+  });
+  if (!baseUrl) return undefined;
+  const username = await vscode.window.showInputBox({
+    title: 'Connect QNAP NAS',
+    prompt: 'Enter the dedicated NAS account that can read and write this backup folder.',
+    placeHolder: 'solosync-backup',
+    value: current?.username,
+    ignoreFocusOut: true,
+    validateInput: (value) => value.trim() ? undefined : 'Enter the NAS username.',
+  });
+  if (!username) return undefined;
+  const password = await vscode.window.showInputBox({
+    title: 'Connect QNAP NAS',
+    prompt: 'Enter the NAS password. SoloSync stores it in VS Code secure storage.',
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (value) => value ? undefined : 'Enter the NAS password.',
+  });
+  if (!password) return undefined;
+  const connection = { baseUrl: normalizeQnapWebDavUrl(baseUrl), username: username.trim() };
+  try {
+    const provider = await QnapWebDavProvider.create(connection, password);
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'SoloSync is checking the QNAP backup folder',
+      cancellable: false,
+    }, () => provider.testConnection());
+    await context.globalState.update(qnapConnectionKey, connection);
+    await context.secrets.store(qnapPasswordKey, password);
+    await context.globalState.update('backupLocationKind', 'qnap');
+    return provider;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not connect to QNAP: ${message}`);
+    return undefined;
+  }
 }
 
 function backupLocationKind(context: vscode.ExtensionContext): BackupLocationKind | undefined {
   const value = context.globalState.get<string>('backupLocationKind');
-  return value === 'googleDrive' || value === 'nas' || value === 'local' ? value : undefined;
+  return value === 'googleDrive' || value === 'nas' || value === 'local' || value === 'qnap' ? value : undefined;
 }
 
-async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreeProvider): Promise<SnapshotManifest | undefined> {
-  if (item?.manifest) return item.manifest;
+function backupLocationDescription(context: vscode.ExtensionContext): string {
+  if (backupLocationKind(context) === 'qnap') {
+    const connection = qnapConnection(context);
+    return connection ? new URL(connection.baseUrl).hostname : 'Not connected';
+  }
   const directory = backupDirectory();
+  return directory ? path.basename(directory) || directory : 'Not selected';
+}
+
+async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreeProvider, context: vscode.ExtensionContext, provider: StorageProvider): Promise<SnapshotManifest | undefined> {
+  if (item?.manifest) return item.manifest;
   const roots = protectedRoots();
-  if (!directory || roots.length === 0) return undefined;
-  const snapshots = await repository.list(directory, projectIdFor(roots));
+  if (roots.length === 0) return undefined;
+  const snapshots = await repository.list(provider, await resolveProjectId(context, provider, roots));
   const picked = await vscode.window.showQuickPick(snapshots.map((manifest) => ({
     label: new Date(manifest.createdAt).toLocaleString(),
     description: manifest.git.message || manifest.reason,
@@ -393,29 +546,98 @@ async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreePr
   return picked?.manifest;
 }
 
-async function restoreSnapshot(manifest: SnapshotManifest | undefined, directory: string | undefined): Promise<void> {
-  if (!manifest || !directory) return;
-  const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, title: 'Choose an empty parent folder for the restored workspace' });
-  if (!picked?.[0]) return;
-  const destination = path.join(picked[0].fsPath, `${manifest.projectName}-restored-${manifest.snapshotId.slice(0, 19)}`);
-  await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'SoloSync is restoring the snapshot', cancellable: false }, () => repository.restoreAll(directory, manifest, destination));
-  const action = await vscode.window.showInformationMessage(`Snapshot restored to ${destination}`, 'Open Folder');
-  if (action === 'Open Folder') await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(destination), { forceNewWindow: true });
+async function browseBackups(context: vscode.ExtensionContext): Promise<void> {
+  let provider = await configuredProvider(context);
+  if (!provider) provider = await chooseBackupLocation(context, []);
+  if (!provider) return;
+  try {
+    await provider.validate();
+    const projects = await repository.listProjects(provider);
+    if (projects.length === 0) {
+      void vscode.window.showInformationMessage('No SoloSync backups were found in this location.');
+      return;
+    }
+    const project = await vscode.window.showQuickPick(projects.map((item) => ({
+      label: item.projectName,
+      description: `Latest backup ${new Date(item.updatedAt).toLocaleString()}`,
+      item,
+    })), { title: 'Browse SoloSync Backups', placeHolder: 'Choose a project to recover' });
+    if (!project) return;
+    const snapshots = await repository.list(provider, project.item.projectId);
+    const snapshot = await vscode.window.showQuickPick(snapshots.map((manifest) => ({
+      label: new Date(manifest.createdAt).toLocaleString(),
+      description: manifest.git.message || manifest.reason,
+      detail: `${manifest.files.length.toLocaleString()} files`,
+      manifest,
+    })), { title: project.item.projectName, placeHolder: 'Choose a backup' });
+    if (!snapshot) return;
+    const action = await vscode.window.showQuickPick([
+      { label: '$(folder-opened) Restore Project', description: 'Restore into a new folder', action: 'restore' },
+      { label: '$(file) Restore One File', description: 'Choose one file from this backup', action: 'file' },
+      { label: '$(verified-filled) Check Integrity', description: 'Verify every backed-up file', action: 'verify' },
+    ], { title: new Date(snapshot.manifest.createdAt).toLocaleString(), placeHolder: 'What would you like to do?' });
+    if (action?.action === 'restore') await restoreSnapshot(snapshot.manifest, provider, context);
+    if (action?.action === 'file') await restoreFile(snapshot.manifest, provider);
+    if (action?.action === 'verify') await verifySnapshot(snapshot.manifest, provider);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not browse the backups: ${message}`);
+  }
 }
 
-async function restoreFile(manifest: SnapshotManifest | undefined, directory: string | undefined): Promise<void> {
-  if (!manifest || !directory) return;
+async function availableRestoreDirectory(parent: string, name: string): Promise<string> {
+  for (let suffix = 1; suffix < 1_000; suffix += 1) {
+    const candidate = path.join(parent, suffix === 1 ? name : `${name}-${suffix}`);
+    try {
+      await stat(candidate);
+    } catch {
+      return candidate;
+    }
+  }
+  throw new Error('Choose another restore location.');
+}
+
+function safeRestoreName(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+$/, 'project').slice(0, 80) || 'project';
+}
+
+async function restoreSnapshot(manifest: SnapshotManifest | undefined, provider: StorageProvider, context: vscode.ExtensionContext): Promise<void> {
+  if (!manifest) return;
+  const picked = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, title: 'Choose an empty parent folder for the restored workspace' });
+  if (!picked?.[0]) return;
+  const destination = await availableRestoreDirectory(picked[0].fsPath, `${safeRestoreName(manifest.projectName)}-restored-${manifest.snapshotId.slice(0, 19)}`);
+  try {
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'SoloSync is restoring and checking the snapshot', cancellable: false }, () => repository.restoreAll(provider, manifest, destination));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await rm(destination, { recursive: true, force: true }).catch(() => undefined);
+    void vscode.window.showErrorMessage(`SoloSync could not restore this backup: ${message}`);
+    return;
+  }
+  for (const root of manifest.roots) await associateProject(context, path.join(destination, root), manifest.projectId);
+  const folderToOpen = manifest.roots.length === 1 ? path.join(destination, manifest.roots[0]) : destination;
+  const action = await vscode.window.showInformationMessage(`Snapshot restored to ${destination}`, 'Open Folder');
+  if (action === 'Open Folder') await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(folderToOpen), { forceNewWindow: true });
+}
+
+async function restoreFile(manifest: SnapshotManifest | undefined, provider: StorageProvider): Promise<void> {
+  if (!manifest) return;
   const pickedFile = await vscode.window.showQuickPick(manifest.files.map((file) => ({ label: file.path, description: file.root, file })), { placeHolder: 'Choose a file to restore' });
   if (!pickedFile) return;
   const destination = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.basename(pickedFile.file.path)), title: 'Restore file as' });
   if (!destination) return;
-  await repository.restoreFile(directory, manifest, pickedFile.file, destination.fsPath);
-  void vscode.window.showInformationMessage(`Restored ${pickedFile.file.path}`);
+  try {
+    await repository.restoreFile(provider, manifest, pickedFile.file, destination.fsPath);
+    void vscode.window.showInformationMessage(`Restored ${pickedFile.file.path}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not restore this file: ${message}`);
+  }
 }
 
-async function verifySnapshot(manifest: SnapshotManifest | undefined, directory: string | undefined): Promise<void> {
-  if (!manifest || !directory) return;
-  const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'SoloSync is checking the snapshot', cancellable: false }, () => repository.verify(directory, manifest));
+async function verifySnapshot(manifest: SnapshotManifest | undefined, provider: StorageProvider): Promise<void> {
+  if (!manifest) return;
+  const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'SoloSync is checking the snapshot', cancellable: false }, () => repository.verify(provider, manifest));
   if (result.valid) {
     void vscode.window.showInformationMessage(`Snapshot verified: ${result.checked} files are intact.`);
   } else {

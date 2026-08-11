@@ -7,7 +7,7 @@
 首版建议直接支持：
 
 - Google Drive：使用 Drive API，OAuth 权限只申请 `drive.file`。
-- QNAP NAS：优先使用 SFTP + SSH 公钥；WebDAV 作为无法启用 SSH 时的兼容选项。
+- QNAP NAS：使用 QTS/QuTS hero 官方 WebDAV，通过 HTTPS 域名连接专用共享文件夹和最小权限账户。
 - 备份格式：每次生成不可变快照，不做双向同步，不删除本地文件，也不让远端状态反向覆盖工作区。
 - 恢复策略：先恢复到用户选择的新目录；覆盖当前工作区必须二次确认，并在覆盖前自动生成本地安全快照。
 
@@ -109,8 +109,8 @@ VS Code 命令/侧栏/状态栏
           │
    StorageProvider 接口
      ├─ GoogleDriveProvider
-     ├─ SftpProvider
-     └─ WebDavProvider
+     ├─ LocalFileSystemProvider
+     └─ QnapWebDavProvider
 ```
 
 ### 模块职责
@@ -151,18 +151,13 @@ interface StorageProvider {
 
 ### QNAP NAS
 
-首选 SFTP：
+默认使用 WebDAV：
 
-- 用户输入主机、端口、用户名、远端共享目录；首次连接必须展示并固定服务器 host key 指纹，指纹变化时阻止上传并明确告警。
-- 优先 SSH agent 或私钥认证，密码只作为兼容方案。
-- 上传到临时文件名，完成校验后原子 rename；连接断开后支持重试。
-- NAS 端不需要安装专用应用，只需 QTS 启用 SSH/SFTP 并授予目标共享目录权限。
-
-WebDAV 兼容模式：
-
-- 使用 HTTPS，拒绝默认接受无效证书；自签名证书必须由用户显式信任证书指纹。
+- 使用 HTTPS，并要求证书通过操作系统信任链与域名校验；插件不提供忽略证书错误或单独信任指纹的旁路。
 - 通过 `MKCOL`、`PUT`、`PROPFIND`、`MOVE` 实现目录、上传、列表和提交。
-- QTS 5.2 官方用户指南包含 WebDAV 配置入口，因此可作为不开放 SSH 时的后备方案；性能、断点续传和服务端校验能力通常弱于 SFTP，UI 中可标为“兼容模式”，但不要要求用户理解协议细节。
+- QTS 5.2 官方用户指南提供 WebDAV 配置和共享文件夹权限入口，可用非管理员专用账户把权限限制在 SoloSync 共享文件夹。
+- QTS 5.2 官方 SSH/SFTP 入口只允许管理员账户，因此 SFTP 不作为本产品的默认 QNAP 接入方式。
+- 域名入口必须通过完整连接测试，证明 `PROPFIND`、`MKCOL`、`PUT`、`GET`、`MOVE` 和 `DELETE` 都能穿过反向代理。
 
 SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目录挂载为本地磁盘，可直接提供“本地文件夹”后端，这比在 Node 扩展内维护 SMB 客户端更简单可靠。
 
@@ -183,7 +178,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 - VS Code 桌面扩展骨架、用户选择的单项目目录扫描、排除规则。
 - 完整快照、manifest、SHA-256、恢复到新目录。
 - Google Drive `drive.file` + resumable upload。
-- QNAP SFTP + host key 固定。
+- QNAP HTTPS WebDAV + SecretStorage 凭据。
 - 手动备份、空闲自动备份、历史列表、连接测试、取消与重试。
 
 验收标准：在 Windows、macOS、Linux 各完成一次 1 GB 项目的中断续传；从 Google Drive 和 QNAP 各恢复到空目录，逐文件哈希与原项目一致；宽工作区下只包含用户选择的项目目录；取消后不发布快照且不残留本次 staging；凭据不出现在设置 JSON、日志和备份内容中。
@@ -191,7 +186,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 ### 第二阶段：可靠性与空间效率
 
 - 选择性恢复、覆盖前差异预览与安全快照。
-- WebDAV、本地挂载目录后端。
+- 本地挂载目录后端、QNAP 性能与兼容性增强。
 - 内容寻址增量、保留策略、完整性定期巡检。
 - 客户端加密与离线恢复工具。
 
@@ -213,7 +208,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 1. 产品定义为“版本化备份”，不是“远程同步”。
 2. UI 只有一套备份心智，Drive/SFTP/WebDAV 是实现细节。
 3. 首版自带两个原生 provider，不强依赖 rclone。
-4. Google 只申请 `drive.file`；QNAP 默认 SFTP + host key 固定。
+4. Google 只申请 `drive.file`；QNAP 默认 HTTPS WebDAV + 最小权限账户。
 5. 恢复到新目录是默认路径；覆盖当前工作区必须有差异预览和安全快照。
 6. 首版先做完整不可变快照；增量去重在引用与回收机制验证后再上线。
 
@@ -225,4 +220,6 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 - [VS Code Extension API：FileSystemWatcher](https://code.visualstudio.com/api/references/vscode-api)
 - [VS Code：Workspace Trust](https://code.visualstudio.com/api/extension-guides/workspace-trust)
 - [QTS 5.2 User Guide：WebDAV 与服务配置](https://docs.qnap.com/operating-system/qts/5.2.x/qts5.2.x-ug-en-us.pdf)
+- [QTS 5.2：配置 WebDAV](https://docs.qnap.com/operating-system/qts/5.2.x/en-us/configuring-webdav-settings-CDDF133D.html)
+- [QTS 5.2：配置 SSH/SFTP（仅管理员账户）](https://docs.qnap.com/operating-system/qts/5.2.x/en-us/configuring-ssh-connections-928DF42B.html)
 - [rclone GitHub 仓库](https://github.com/rclone/rclone)

@@ -1,6 +1,7 @@
 .github/**
 .git/**
 docs/**
+!docs/qnap-webdav-design.md
 src/**
 test/**
 scripts/**
@@ -12,4 +13,9 @@ PROJECT_MEMORY.md
 tsconfig.json
 *.vsix
 node_modules/**
-!node_modules/.bin/**
+out/backupLocation.*
+out/git.*
+out/historyTree.*
+out/snapshotRepository.*
+out/storageProvider.*
+out/types.*

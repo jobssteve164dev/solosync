@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync - Local Code Snapshots",
   "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -36,6 +36,7 @@
     "onCommand:solosync.openSettings",
     "onCommand:solosync.backupNow",
     "onCommand:solosync.cancelBackup",
+    "onCommand:solosync.browseBackups",
     "onCommand:solosync.restoreSnapshot",
     "onCommand:solosync.restoreFile",
     "onCommand:solosync.verifySnapshot"
@@ -80,6 +81,12 @@
         "icon": "$(debug-stop)"
       },
       {
+        "command": "solosync.browseBackups",
+        "title": "SoloSync: Browse and Restore Backups",
+        "category": "SoloSync",
+        "icon": "$(history)"
+      },
+      {
         "command": "solosync.restoreSnapshot",
         "title": "SoloSync: Restore Snapshot",
         "category": "SoloSync"
@@ -121,12 +128,12 @@
     "viewsWelcome": [
       {
         "view": "solosync.history",
-        "contents": "Choose the project folder SoloSync should protect.\n[Choose Project Folder](command:solosync.configureSource)",
+        "contents": "Choose a project to protect or recover an existing backup.\n[Choose Project Folder](command:solosync.configureSource)\n[Browse Backups](command:solosync.browseBackups)",
         "when": "!solosync.hasSourceDirectory"
       },
       {
         "view": "solosync.history",
-        "contents": "The selected project folder is unavailable.\n[Choose Another Project Folder](command:solosync.configureSource)",
+        "contents": "The selected project folder is unavailable.\n[Choose Another Project Folder](command:solosync.configureSource)\n[Browse Backups](command:solosync.browseBackups)",
         "when": "solosync.hasSourceDirectory && !solosync.sourceDirectoryAvailable"
       },
       {
@@ -166,6 +173,11 @@
           "command": "solosync.refresh",
           "when": "view == solosync.history",
           "group": "navigation@3"
+        },
+        {
+          "command": "solosync.browseBackups",
+          "when": "view == solosync.history",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -246,14 +258,19 @@
     "test": "npm run build && node --test test/*.test.js",
     "package": "npx @vscode/vsce package",
     "render-icon": "node scripts/render-icon.cjs",
-    "build": "npm run render-icon && npm run compile"
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=out/extension.js --sourcemap",
+    "build": "npm run render-icon && npm run compile && npm run bundle"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.9",
     "pngjs": "^7.0.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "webdav": "^5.10.0"
   }
 }

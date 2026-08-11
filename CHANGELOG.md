@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.6
+
+- Connect directly to a QNAP shared folder through its HTTPS address, with Basic or Digest authentication and credentials kept in VS Code secure storage.
+- Verify WebDAV read, write, move, and cleanup capabilities before saving a QNAP connection.
+- Build each snapshot locally, verify every uploaded file, and publish remote history only after the complete snapshot passes SHA-256 checks.
+- Browse projects and restore verified snapshots from the backup location without requiring the original project folder or computer.
+- Keep existing local, mounted NAS, and synchronized-folder backups compatible with the new storage layer.
+
 ## 0.0.5
 
 - Require an explicit project-folder selection and never fall back to a broader VS Code workspace.

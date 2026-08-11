@@ -3,12 +3,13 @@ import { access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { WorkspaceRoot } from './types';
 
-export type BackupLocationKind = 'googleDrive' | 'nas' | 'local';
+export type BackupLocationKind = 'googleDrive' | 'nas' | 'local' | 'qnap';
 
 export const backupLocationLabels: Record<BackupLocationKind, string> = {
   googleDrive: 'Google Drive',
   nas: 'NAS',
   local: 'Local or external drive',
+  qnap: 'QNAP NAS',
 };
 
 export function isPathInsideDirectory(candidate: string, directory: string): boolean {
