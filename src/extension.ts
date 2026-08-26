@@ -3,6 +3,7 @@ import { rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory, validateSourceDirectory } from './backupLocation';
+import { BackupSettingsOption, buildBackupSettingsOptions } from './backupSettings';
 import { isBackupWorthyGitOperation, readGitState } from './git';
 import { HistoryTreeProvider, SnapshotItem } from './historyTree';
 import { projectIdFor, SnapshotCancelledError, SnapshotRepository } from './snapshotRepository';
@@ -319,7 +320,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { label: '$(root-folder) Project folder', description: sourceDirectory() ? path.basename(sourceDirectory()!) : 'Not selected', command: 'solosync.configureSource' },
         { label: '$(folder-opened) Backup location', description: backupLocationDescription(context), command: 'solosync.configure' },
         { label: '$(history) Browse backups', description: 'Restore without the original project', command: 'solosync.browseBackups' },
-        { label: '$(gear) Backup options', description: 'Timing and exclusions', command: 'solosync.openSettings' },
+        { label: '$(gear) Backup settings', description: 'Connection, timing, and exclusions', command: 'solosync.openSettings' },
       ], { title: 'SoloSync Setup', placeHolder: 'What would you like to configure?' });
       if (action) await vscode.commands.executeCommand(action.command);
     }),
@@ -340,7 +341,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (action === 'Back Up Now') await backup('Manual backup');
       if (action === 'Browse Backups') await browseBackups(context);
     }),
-    vscode.commands.registerCommand('solosync.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:SZLK.solosync')),
+    vscode.commands.registerCommand('solosync.openSettings', () => openBackupSettings(context, refresh)),
     vscode.commands.registerCommand('solosync.backupNow', () => backup('Manual backup')),
     vscode.commands.registerCommand('solosync.cancelBackup', () => activeBackupController?.abort()),
     vscode.commands.registerCommand('solosync.refresh', refresh),
@@ -531,6 +532,47 @@ function backupLocationDescription(context: vscode.ExtensionContext): string {
   }
   const directory = backupDirectory();
   return directory ? path.basename(directory) || directory : 'Not selected';
+}
+
+async function openBackupSettings(context: vscode.ExtensionContext, refresh: () => Promise<void>): Promise<void> {
+  const kind = backupLocationKind(context);
+  const connection = kind === 'qnap' ? qnapConnection(context) : undefined;
+  const hasQnapPassword = connection ? Boolean(await context.secrets.get(qnapPasswordKey)) : false;
+  const destination = connection?.baseUrl ?? backupDirectory();
+  const options = buildBackupSettingsOptions({
+    kind,
+    kindLabel: kind ? backupLocationLabels[kind] : undefined,
+    destination,
+    qnapUsername: connection?.username,
+    qnapPasswordSaved: hasQnapPassword,
+    backupAfterCommit: config().get<boolean>('autoBackupAfterCommit', true),
+    idleBackupMinutes: config().get<number>('idleBackupMinutes', 10),
+    exclusionCount: config().get<string[]>('exclude', []).length,
+  });
+  const selected = await vscode.window.showQuickPick(options, {
+    title: 'SoloSync Backup Settings',
+    placeHolder: 'Choose what you want to change',
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!selected) return;
+  if (selected.action === 'location') {
+    await vscode.commands.executeCommand('solosync.configure');
+    return;
+  }
+  if (selected.action === 'qnapConnection') {
+    const provider = await configureQnap(context);
+    if (!provider) return;
+    await refresh();
+    void vscode.window.showInformationMessage('QNAP connection is ready.');
+    return;
+  }
+  const setting = {
+    commitTiming: 'solosync.autoBackupAfterCommit',
+    idleTiming: 'solosync.idleBackupMinutes',
+    exclusions: 'solosync.exclude',
+  }[selected.action];
+  await vscode.commands.executeCommand('workbench.action.openSettings', setting);
 }
 
 async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreeProvider, context: vscode.ExtensionContext, provider: StorageProvider): Promise<SnapshotManifest | undefined> {

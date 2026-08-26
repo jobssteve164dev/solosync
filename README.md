@@ -26,7 +26,7 @@ SoloSync never synchronizes remote deletions back into your workspace. The first
 
 The sidebar Setup button keeps the two choices separate: **Project folder** is what SoloSync backs up, while **Backup location** is where snapshots are stored. A QNAP can be connected directly with the HTTPS address of a WebDAV-enabled shared folder. Google Drive must already be signed in and synchronized by Google Drive for desktop, and other NAS shares must already be mounted by your operating system. SoloSync checks that the selected location is available and writable. A mounted backup folder inside the selected project is automatically excluded from snapshots.
 
-Setup also opens backup timing and exclusion options. The sidebar shows the selected project, storage type, and destination folder, and provides recovery actions if either location becomes unavailable.
+Backup Settings keeps the destination, QNAP HTTPS address and secure sign-in, backup timing, and exclusions in one entry point. QNAP passwords remain hidden in VS Code secure storage rather than appearing in `settings.json`. The sidebar shows the selected project, storage type, and destination folder, and provides recovery actions if either location becomes unavailable.
 
 Future snapshots appear in the SoloSync activity bar. Git commit backups are enabled by default. Idle backups default to ten minutes and can be changed in VS Code Settings.
 

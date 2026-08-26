@@ -64,7 +64,7 @@
       },
       {
         "command": "solosync.openSettings",
-        "title": "SoloSync: Open Settings",
+        "title": "SoloSync: Backup Settings",
         "category": "SoloSync",
         "icon": "$(gear)"
       },
@@ -217,7 +217,7 @@
         "solosync.backupDirectory": {
           "type": "string",
           "default": "",
-          "description": "Local or mounted NAS directory where SoloSync stores snapshots. Use 'SoloSync: Choose Backup Location' instead of editing this manually."
+          "description": "Local or mounted NAS directory where SoloSync stores snapshots. QNAP HTTPS connections and secure sign-in are managed through 'SoloSync: Backup Settings'."
         },
         "solosync.autoBackupAfterCommit": {
           "type": "boolean",

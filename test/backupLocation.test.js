@@ -50,8 +50,13 @@ test('sidebar exposes setup, settings, and recovery entry points', () => {
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.configureSource'));
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.cancelBackup'));
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.browseBackups'));
+  assert.equal(
+    manifest.contributes.commands.find((item) => item.command === 'solosync.openSettings').title,
+    'SoloSync: Backup Settings',
+  );
   assert.ok(manifest.contributes.menus['view/title'].some((item) => item.command === 'solosync.cancelBackup' && item.when.includes('solosync.backupRunning')));
   assert.ok(manifest.contributes.configuration.properties['solosync.sourceDirectory']);
+  assert.match(manifest.contributes.configuration.properties['solosync.backupDirectory'].description, /QNAP HTTPS connections and secure sign-in/);
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.hasSourceDirectory')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.hasBackupLocation')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.backupLocationAvailable')));
