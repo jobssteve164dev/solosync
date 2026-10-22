@@ -18,6 +18,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Storage backends share one snapshot repository contract. The production backends are filesystem directories and native QNAP HTTPS/WebDAV connections.
 - QNAP credentials use a dedicated least-privilege NAS account. The password is stored in VS Code SecretStorage and is never written to extension settings or snapshot manifests.
 - Marketplace credentials are stored as encrypted GitHub Actions Secrets in the SoloSync repository so the project publishes independently.
+- A push to `main` automatically publishes an unreleased `package.json` version to Visual Studio Marketplace and Open VSX, then creates the matching tag and GitHub Release. Existing complete releases are skipped, while interrupted draft or missing-asset releases resume from the frozen release commit.
 
 ## Architecture Boundaries
 
@@ -40,7 +41,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 ## Handoff Notes
 
 - `0.0.6` has mock-WebDAV coverage for Basic and Digest authentication, capability probing, verified publish, discovery, restore, corruption rejection, cancellation, and staging cleanup. A real QNAP connection is intentionally pending the next session and must be validated before calling native QNAP support production-verified.
-- `SZLK.solosync@0.0.5` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX. It requires explicit project selection and provides observable, cancellable backups with precise staging cleanup.
+- `SZLK.solosync@0.0.6` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the same packaged VSIX bytes. It adds native QNAP HTTPS/WebDAV support, but real-device validation is still pending.
 - `SZLK.solosync@0.0.4` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX.
 - `0.0.4` allows a dedicated backup folder inside a broader VS Code workspace and excludes that folder from snapshot scans and idle-backup triggers; only choosing an actual workspace root itself remains blocked.
 - `0.0.3` added sidebar setup and settings entry points, guided Google Drive desktop-folder / mounted NAS / local-drive choices, location availability validation, and recoverable empty states.
