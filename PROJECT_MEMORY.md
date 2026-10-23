@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.14` is the release candidate that removes the redundant single-root folder introduced by 0.0.13; `0.0.13` is the latest published version until the candidate passes release gates.
+- Current stage: Version `0.0.14` is published. It removes the redundant single-root folder introduced by 0.0.13 while preserving the old folder and any extra contents in `Backup History`.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
