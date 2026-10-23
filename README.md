@@ -74,7 +74,7 @@ SoloSync tests the connection by creating, reading, moving, and removing one tem
 
 Use **SoloSync: Browse and Restore Backups** to recover a project even when its original folder or computer is unavailable. See the [QNAP implementation and security design](docs/qnap-webdav-design.md) for supported gateway and authentication boundaries.
 
-Native Google Drive OAuth and client-side encryption remain future storage milestones. See [the product design](docs/product-design.md) for the full architecture and roadmap.
+Native Google Drive OAuth and client-side encryption remain future storage milestones. See the [native Google Drive connection design](docs/google-drive-native-design.md) and [product design](docs/product-design.md) for the implementation contract and roadmap.
 
 ## Development
 

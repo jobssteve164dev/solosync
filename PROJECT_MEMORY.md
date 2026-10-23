@@ -29,7 +29,8 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - The backup source is the single project folder explicitly selected by the user; SoloSync does not infer or fall back to the VS Code workspace root.
 - Snapshot scanning and copying accept cancellation and report progress. Cancellation or failure removes only the staging directory created by that run and never publishes it as a snapshot.
 - Native QNAP backups stage files locally, upload into a remote staging directory, read every file back for SHA-256 verification, then publish with WebDAV MOVE. Discovery and restore work without the original project folder.
-- Native Google Drive OAuth, client-side encryption, retention, and incremental content-addressed storage remain later milestones documented in `docs/product-design.md`.
+- Native Google Drive OAuth remains unimplemented; its implementation-ready product, authorization, storage, resumability, security, and acceptance design is documented in `docs/google-drive-native-design.md`. The first releasable auth topology is Desktop OAuth with system browser, PKCE, and loopback; remote/code-server Device Flow remains gated on Google confirmation and production verification.
+- Client-side encryption, retention, and incremental content-addressed storage remain later milestones documented in `docs/product-design.md`.
 
 ## Verification
 
@@ -45,6 +46,6 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - `SZLK.solosync@0.0.4` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX.
 - `0.0.4` allows a dedicated backup folder inside a broader VS Code workspace and excludes that folder from snapshot scans and idle-backup triggers; only choosing an actual workspace root itself remains blocked.
 - `0.0.3` added sidebar setup and settings entry points, guided Google Drive desktop-folder / mounted NAS / local-drive choices, location availability validation, and recoverable empty states.
-- Native Google Drive OAuth is still not implemented; Google Drive continues to require a synchronized desktop folder.
+- Native Google Drive OAuth is still not implemented; Google Drive continues to require a synchronized desktop folder. The documented target experience removes that folder picker, auto-creates `SoloSync Backups`, uses `drive.file`, persists resumable backup jobs across restarts, and distinguishes local disconnect from account-wide authorization revocation; see `docs/google-drive-native-design.md`.
 - Icon rendering is generated with resvg and protected by a pixel-level regression test.
 - Continue from `/home/ubuntu/project/solosync`; do not recreate the project under `.solomap-global/memory/inbox`.

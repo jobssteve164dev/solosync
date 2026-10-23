@@ -142,12 +142,13 @@ interface StorageProvider {
 
 ### Google Drive
 
-- 使用系统浏览器 OAuth + PKCE，回调到 VS Code URI handler。
+- 本地桌面使用系统浏览器、Desktop OAuth、PKCE 与 loopback 回调。远程/code-server 的 Device Authorization Flow 必须先取得 Google 对目标宿主场景的确认并完成验证，不能因为 scope 可用就直接视为合规生产方案；Google 已停止支持自定义 URI scheme，因此也不把 VS Code URI handler 直接注册为 Google OAuth redirect URI。
 - 权限使用 `https://www.googleapis.com/auth/drive.file`，只访问插件创建或由用户明确交给插件的文件；不要申请完整 `drive` 权限。
-- 首次连接时创建 `CodeBackups` 文件夹并保存 folder ID，后续按父级 ID 查询，避免依赖同名路径。
+- 首次连接时自动创建 `SoloSync Backups` 文件夹并保存 folder ID，不再要求用户选择本地同步目录；后续按父级 ID 查询，避免依赖同名路径。
 - 大于 5 MB 或网络可能中断时使用 resumable upload；Google 官方建议可续传上传也适用于小文件，上传分块除最后一块外应为 256 KiB 的倍数。
-- 保存 resumable session URI 与已上传偏移到 workspace storage，重启后继续；session 过期或返回 404 时重新创建上传会话。
-- 利用 Drive 文件 ID 与 `appProperties` 保存 project ID、snapshot ID、format version，避免依赖文件名解析。
+- 将 resumable session URI 作为敏感凭据保存到 SecretStorage；snapshot ID、冻结后的本地副本、预留 Drive file ID 与任务状态持久保存。重启后查询服务端 `Range` 再继续，不能只相信本地偏移。
+- 利用预生成的 Drive file ID 与 `appProperties` 保存 project ID、snapshot ID、format version、logical key hash 和发布状态；Drive 允许重名，不能按名称任取一个对象。Google backend 不创建共享可变的 `project.json`，项目状态从 committed snapshots 派生。
+- 完整连接、存储、失败恢复与验收设计见 [`google-drive-native-design.md`](google-drive-native-design.md)。
 
 ### QNAP NAS
 
