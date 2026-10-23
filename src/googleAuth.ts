@@ -32,6 +32,7 @@ interface GoogleTokenResponse {
 
 const refreshTokenKey = 'solosync.google.refreshToken';
 const hostedCredentialKey = 'solosync.google.hostedCredential';
+const solosyncUserAgent = 'Mozilla/5.0 (compatible; SoloSync VS Code Extension; +https://github.com/jobssteve164dev/solosync)';
 
 export async function clearGoogleUploadSessions(keys: string[], secrets: GoogleSecretStore): Promise<void> {
   await Promise.all(keys.map((key) => secrets.delete(`solosync.${key}`)));
@@ -96,7 +97,7 @@ export class HostedGoogleTokenManager {
   private async post(path: string, body: Record<string, string>, signal?: AbortSignal): Promise<HostedTokenResponse> {
     const response = await this.fetchImpl(`${this.options.brokerUrl.replace(/\/$/, '')}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'user-agent': solosyncUserAgent },
       body: JSON.stringify(body),
       signal,
     });

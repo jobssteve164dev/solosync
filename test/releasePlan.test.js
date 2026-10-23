@@ -15,8 +15,9 @@ test('runs a lockfile-pinned Wrangler during release', () => {
 
 test('waits for the deployed authorization service to become reachable', () => {
   const workflow = require('node:fs').readFileSync(path.resolve(__dirname, '../.github/workflows/publish.yml'), 'utf8');
-  assert.match(workflow, /for \(let attempt = 0; attempt < 30; attempt \+= 1\)/);
-  assert.match(workflow, /if \(attempt < 29\) await delay\(5_000\)/);
+  assert.match(workflow, /for \(let attempt = 0; attempt < 6; attempt \+= 1\)/);
+  assert.match(workflow, /if \(attempt < 5\) await delay\(5_000\)/);
+  assert.match(workflow, /onlyEdgeBlocks &&= error\.edgeBlocked === true/);
 });
 
 const script = path.resolve(__dirname, '../scripts/release-plan.mjs');

@@ -98,7 +98,7 @@ test('connects a browser workspace with a broker callback code and stores only t
       delete: async (key) => stored.delete(key),
     },
     fetch: async (url, init) => {
-      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined, userAgent: init?.headers?.['user-agent'] });
       if (String(url).endsWith('/start')) return Response.json({ authorizationUrl: 'https://accounts.google.com/auth', expiresAt: Date.now() + 60_000 });
       if (String(url).endsWith('/exchange')) return Response.json({ accessToken: 'hosted-access-1', expiresIn: 1, credential: 'opaque-credential-1' });
       if (String(url).endsWith('/token')) return Response.json({ accessToken: 'hosted-access-2', expiresIn: 3600, credential: 'opaque-credential-2' });
@@ -116,6 +116,7 @@ test('connects a browser workspace with a broker callback code and stores only t
   assert.equal(stored.get('solosync.google.hostedCredential'), 'opaque-credential-1');
   assert.equal([...stored.values()].includes('refresh-token'), false);
   assert.match(requests[0].body.codeChallenge, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(requests[0].userAgent, /SoloSync VS Code Extension/);
   assert.equal(requests[1].body.callbackCode, 'callback-code');
   assert.ok(requests[1].body.codeVerifier.length >= 43);
 
