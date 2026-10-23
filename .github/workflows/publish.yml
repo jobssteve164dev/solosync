@@ -107,29 +107,43 @@ jobs:
       - name: Verify hosted Google authorization service
         if: steps.release.outputs.should_publish == 'true'
         run: |
-          test "$(curl -fsS https://solosync.szlk.uk/health)" = '{"status":"ok"}'
           node --input-type=module <<'NODE'
-          const response = await fetch('https://solosync.szlk.uk/v1/auth/start', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ codeChallenge: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ' }),
-          });
-          if (!response.ok) throw new Error(`Authorization start failed (${response.status}).`);
-          const { authorizationUrl } = await response.json();
-          const authorization = new URL(authorizationUrl);
-          const expected = {
-            origin: 'https://accounts.google.com',
-            redirect: 'https://solosync.szlk.uk/oauth/google/callback',
-            scope: 'https://www.googleapis.com/auth/drive.file',
-            method: 'S256',
-          };
-          if (authorization.origin !== expected.origin
-            || authorization.searchParams.get('redirect_uri') !== expected.redirect
-            || authorization.searchParams.get('scope') !== expected.scope
-            || authorization.searchParams.get('code_challenge_method') !== expected.method
-            || !authorization.searchParams.get('client_id')) {
-            throw new Error('Authorization start returned an invalid Google request.');
+          const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+          let lastError;
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            try {
+              const health = await fetch('https://solosync.szlk.uk/health', { cache: 'no-store' });
+              if (!health.ok || JSON.stringify(await health.json()) !== '{"status":"ok"}') {
+                throw new Error(`Health check failed (${health.status}).`);
+              }
+              const response = await fetch('https://solosync.szlk.uk/v1/auth/start', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ codeChallenge: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ' }),
+              });
+              if (!response.ok) throw new Error(`Authorization start failed (${response.status}).`);
+              const { authorizationUrl } = await response.json();
+              const authorization = new URL(authorizationUrl);
+              const expected = {
+                origin: 'https://accounts.google.com',
+                redirect: 'https://solosync.szlk.uk/oauth/google/callback',
+                scope: 'https://www.googleapis.com/auth/drive.file',
+                method: 'S256',
+              };
+              if (authorization.origin !== expected.origin
+                || authorization.searchParams.get('redirect_uri') !== expected.redirect
+                || authorization.searchParams.get('scope') !== expected.scope
+                || authorization.searchParams.get('code_challenge_method') !== expected.method
+                || !authorization.searchParams.get('client_id')) {
+                throw new Error('Authorization start returned an invalid Google request.');
+              }
+              process.exit(0);
+            } catch (error) {
+              lastError = error;
+              if (attempt < 29) await delay(5_000);
+            }
           }
+          throw lastError;
           NODE
       - name: Package extension
         if: steps.release.outputs.should_publish == 'true'
