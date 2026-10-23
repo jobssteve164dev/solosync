@@ -18,8 +18,10 @@ test('waits for the deployed authorization service to become reachable', () => {
   const workflow = require('node:fs').readFileSync(path.resolve(__dirname, '../.github/workflows/publish.yml'), 'utf8');
   assert.match(workflow, /for \(let attempt = 0; attempt < 6; attempt \+= 1\)/);
   assert.match(workflow, /if \(attempt < 5\) await delay\(5_000\)/);
-  assert.match(workflow, /onlyEdgeBlocks &&= error\.edgeBlocked === true/);
+  assert.doesNotMatch(workflow, /onlyEdgeBlocks/);
   assert.match(workflow, /236059fa43462ebb1271220cf363cc3836ca0be12699ad36cc7be7557f8f87cb/);
+  assert.match(workflow, /\/v1\/auth\/exchange/);
+  assert.match(workflow, /invalid_grant/);
 });
 
 const script = path.resolve(__dirname, '../scripts/release-plan.mjs');

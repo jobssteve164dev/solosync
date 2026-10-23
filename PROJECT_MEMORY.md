@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.9` strengthens the public home and privacy disclosures for Google verification and publishes the official PNG application logo.
+- Current stage: Version `0.0.10` fixes hosted Google token exchange on Cloudflare Workers and verifies the complete deployed callback/exchange path during release.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 

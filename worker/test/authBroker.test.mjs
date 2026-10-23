@@ -152,6 +152,101 @@ test('exchanges a PKCE-bound callback code without exposing the refresh token', 
   assert.equal(tokenBody.get('client_secret'), env.GOOGLE_WEB_CLIENT_SECRET);
 });
 
+test('reports an unreadable Google token response without falling back to a generic 500', async () => {
+  const env = environment();
+  const fetch = async () => new Response('<html>upstream error</html>', {
+    status: 403,
+    headers: { 'content-type': 'text/html' },
+  });
+  const start = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ codeChallenge: challenge }),
+  }), env, { fetch });
+  const { authorizationUrl } = await start.json();
+  const state = new URL(authorizationUrl).searchParams.get('state');
+  const callback = await worker.fetch(new Request(`https://solosync.szlk.uk/oauth/google/callback?code=google-code&state=${encodeURIComponent(state)}`), env, { fetch });
+  const code = callbackCode(await callback.text());
+  const exchange = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/exchange', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ callbackCode: code, codeVerifier: verifier }),
+  }), env, { fetch });
+
+  assert.equal(exchange.status, 502);
+  assert.deepEqual(await exchange.json(), { error: 'Google authorization returned an unreadable response (403).' });
+});
+
+test('reports a Google token response body read failure without a generic 500', async () => {
+  const env = environment();
+  const fetch = async () => ({
+    status: 502,
+    async text() { throw new Error('response stream ended early'); },
+  });
+  const start = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/start', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codeChallenge: challenge }),
+  }), env, { fetch });
+  const { authorizationUrl } = await start.json();
+  const state = new URL(authorizationUrl).searchParams.get('state');
+  const callback = await worker.fetch(new Request(`https://solosync.szlk.uk/oauth/google/callback?code=google-code&state=${encodeURIComponent(state)}`), env, { fetch });
+  const exchange = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/exchange', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ callbackCode: callbackCode(await callback.text()), codeVerifier: verifier }),
+  }), env, { fetch });
+
+  assert.equal(exchange.status, 502);
+  assert.deepEqual(await exchange.json(), { error: 'Google authorization returned an unreadable response (502).' });
+});
+
+test('reports when the Worker cannot reach the Google token service', async () => {
+  const env = environment();
+  const fetch = async () => { throw new Error('diagnostic network failure'); };
+  const start = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ codeChallenge: challenge }),
+  }), env, { fetch });
+  const { authorizationUrl } = await start.json();
+  const state = new URL(authorizationUrl).searchParams.get('state');
+  const callback = await worker.fetch(new Request(`https://solosync.szlk.uk/oauth/google/callback?code=google-code&state=${encodeURIComponent(state)}`), env, { fetch });
+  const code = callbackCode(await callback.text());
+  const exchange = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/exchange', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ callbackCode: code, codeVerifier: verifier }),
+  }), env, { fetch });
+
+  assert.equal(exchange.status, 502);
+  assert.deepEqual(await exchange.json(), { error: 'SoloSync could not reach the Google authorization service.' });
+});
+
+test('calls the Worker global fetch without an object receiver during token exchange', async () => {
+  const env = environment();
+  const start = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ codeChallenge: challenge }),
+  }), env);
+  const { authorizationUrl } = await start.json();
+  const state = new URL(authorizationUrl).searchParams.get('state');
+  const callback = await worker.fetch(new Request(`https://solosync.szlk.uk/oauth/google/callback?code=google-code&state=${encodeURIComponent(state)}`), env);
+  const code = callbackCode(await callback.text());
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = function () {
+    assert.equal(this, undefined);
+    return Promise.resolve(Response.json({ access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600 }));
+  };
+  try {
+    const exchange = await worker.fetch(new Request('https://solosync.szlk.uk/v1/auth/exchange', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callbackCode: code, codeVerifier: verifier }),
+    }), env);
+    assert.equal(exchange.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('rejects a callback code presented without its original PKCE verifier', async () => {
   const env = environment();
   let tokenRequests = 0;

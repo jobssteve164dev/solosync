@@ -173,16 +173,36 @@ async function callback(request, env) {
 
 async function googleToken(execution, env, parameters) {
   requireOAuthConfiguration(env);
-  const response = await execution.fetch(googleTokenEndpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_WEB_CLIENT_ID,
-      client_secret: env.GOOGLE_WEB_CLIENT_SECRET,
-      ...parameters,
-    }),
-  });
-  const body = await response.json();
+  let response;
+  try {
+    response = await execution.fetch(googleTokenEndpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: env.GOOGLE_WEB_CLIENT_ID,
+        client_secret: env.GOOGLE_WEB_CLIENT_SECRET,
+        ...parameters,
+      }),
+    });
+  } catch (error) {
+    console.error('Google token subrequest failed', error instanceof Error ? `${error.name}: ${error.message}` : 'Unknown error');
+    throw new RequestError('SoloSync could not reach the Google authorization service.', 502);
+  }
+  let responseText;
+  try {
+    responseText = await response.text();
+  } catch {
+    throw new RequestError(`Google authorization returned an unreadable response (${response.status}).`, 502);
+  }
+  let body;
+  try {
+    body = JSON.parse(responseText);
+  } catch {
+    throw new RequestError(`Google authorization returned an unreadable response (${response.status}).`, 502);
+  }
+  if (!body || typeof body !== 'object') {
+    throw new RequestError(`Google authorization returned an unreadable response (${response.status}).`, 502);
+  }
   if (!response.ok || !body.access_token) {
     const invalidGrant = body.error === 'invalid_grant';
     throw new RequestError(
@@ -235,7 +255,8 @@ async function revoke(request, env, execution) {
 
 export default {
   async fetch(request, env, context = {}) {
-    const execution = { fetch: context.fetch ?? fetch };
+    const fetchImpl = context.fetch ?? fetch;
+    const execution = { fetch: (...args) => fetchImpl(...args) };
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: json({}).headers });
     const url = new URL(request.url);
     try {

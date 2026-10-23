@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.10
+
+- Fix hosted Google Drive sign-in on Cloudflare Workers by invoking the runtime `fetch` function without an invalid object receiver.
+- Preserve specific, safe errors for Google token network and response failures instead of masking them as a generic authorization outage.
+- Verify the deployed callback and Google token exchange path during every automatic release.
+
 ## 0.0.9
 
 - Make the public home page explicitly identify SoloSync as a VS Code backup and restore extension, explain why Google sign-in is optional, and confirm that the site is viewable without signing in.
