@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.12
+
+- Keep each Google Drive content object's original file name and extension visible while retaining SHA-256 as its stable incremental identity.
+- Rename legacy hash-named objects when they are reused, without uploading their contents again.
+- Store new Google Drive snapshots as timestamped records in one stable Backup History folder instead of creating a folder and `manifest.json` for every automatic backup; older snapshot folders remain restorable.
+- Keep the measured Google Drive path within 21 requests for the first connected empty backup, 8 for one changed small file, 6 for an unchanged snapshot, and 14 for reconnect plus unchanged backup, including checks that recover late writes from another still-open window.
+- Replace per-file lookup and download verification with one paginated object listing and Drive's server-provided SHA-256 metadata, while preserving upload and recovery verification.
+- Batch 100 Drive ID reservations, reuse recent root validation, avoid duplicate fresh-snapshot probes, and skip unchanged project-name updates.
+
 ## 0.0.11
 
 - Store new snapshots as complete manifests backed by stable SHA-256 content objects, so unchanged files are reused instead of copied into every snapshot folder.

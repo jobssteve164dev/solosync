@@ -351,6 +351,71 @@ test('verifies uploaded file contents without loading backup files through metad
   assert.equal(manifest.files.length, 1);
 });
 
+test('rejects an uploaded manifest whose file identity changed without changing its file count', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-manifest-integrity-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(temp, 'backup');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+  class MutatedManifestProvider extends LocalFileSystemProvider {
+    async readFile(key, signal) {
+      const content = await super.readFile(key, signal);
+      if (!key.includes('/staging/') || !key.endsWith('/manifest.json')) return content;
+      const manifest = JSON.parse(content.toString());
+      manifest.files[0].path = 'workspace/renamed.txt';
+      return Buffer.from(JSON.stringify(manifest));
+    }
+  }
+
+  await assert.rejects(new SnapshotRepository().create({
+    provider: new MutatedManifestProvider(backup),
+    projectId: 'manifest-integrity',
+    projectName: 'Manifest Integrity',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reason: 'Test',
+    git: { dirty: true },
+  }), /incomplete snapshot manifest/i);
+});
+
+test('verifies a new object by its stable path when the provider list is briefly stale', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-stale-object-list-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(temp, 'backup');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+  class StaleListProvider extends LocalFileSystemProvider {
+    reconciliations = 0;
+    async reconcileFiles(files, signal) {
+      this.reconciliations += 1;
+      if (this.reconciliations === 2) return new Map(files.map((file) => [file.key, 'missing']));
+      const statuses = new Map();
+      for (const file of files) {
+        statuses.set(file.key, !(await this.exists(file.key, signal))
+          ? 'missing'
+          : await this.hashFile(file.key, signal) === file.sha256 ? 'valid' : 'invalid');
+      }
+      return statuses;
+    }
+  }
+  const provider = new StaleListProvider(backup);
+
+  const manifest = await new SnapshotRepository().create({
+    provider,
+    projectId: 'stale-object-list',
+    projectName: 'Stale Object List',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reason: 'Test',
+    git: { dirty: true },
+  });
+
+  assert.equal(manifest.files.length, 1);
+  assert.deepEqual(await new SnapshotRepository().verify(provider, manifest), { valid: true, checked: 1, errors: [] });
+});
+
 test('resumes the same frozen snapshot after a transient upload failure', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-pending-resume-'));
   const workspace = path.join(temp, 'project');

@@ -9,10 +9,19 @@ export interface StorageEntry {
   type: 'file' | 'directory';
 }
 
+export interface StorageFileExpectation {
+  key: string;
+  sha256: string;
+  displayName?: string;
+}
+
+export type StorageFileStatus = 'missing' | 'valid' | 'invalid';
+
 export interface StorageProvider {
   readonly displayName: string;
   readonly localRoot?: string;
   readonly commitResponseIsAuthoritative?: boolean;
+  reconcileFiles?(files: StorageFileExpectation[], signal?: AbortSignal): Promise<Map<string, StorageFileStatus>>;
   validate(signal?: AbortSignal): Promise<void>;
   testConnection(signal?: AbortSignal): Promise<void>;
   exists(key: string, signal?: AbortSignal): Promise<boolean>;

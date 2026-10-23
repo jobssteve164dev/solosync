@@ -147,7 +147,8 @@ interface StorageProvider {
 - 首次连接时自动创建 `SoloSync Backups` 文件夹并保存 folder ID，不再要求用户选择本地同步目录；后续按父级 ID 查询，避免依赖同名路径。
 - 5 MB 以内且可整体重传的文件使用单请求 multipart upload；更大文件使用 resumable upload，并采用 8 MiB 分块以减少往返（分块仍为 Google 要求的 256 KiB 倍数）。
 - 将 resumable session URI 作为敏感凭据保存到 SecretStorage；snapshot ID、冻结后的本地副本、预留 Drive file ID 与任务状态持久保存。重启后查询服务端 `Range` 再继续，不能只相信本地偏移。
-- 利用预生成的 Drive file ID 与 `appProperties` 保存 project ID、snapshot ID、format version、logical key hash 和发布状态；Drive 允许重名，不能按名称任取一个对象。Google backend 不创建共享可变的 `project.json`，项目状态从 committed snapshots 派生。
+- 利用预生成的 Drive file ID 与 `appProperties` 保存 project ID、snapshot ID、format version、logical key hash 和发布状态；Drive 允许重名，不能按名称任取一个对象。Google backend 不创建共享可变的 `project.json`，而是在唯一 `Backup History` 目录中用 timestamped records 保存新快照状态；旧版 snapshot folders 继续参与发现和恢复。
+- Google Drive 的内容对象继续以 SHA-256 作为逻辑身份，但可见名称使用原文件名和扩展名；完整性通过一次分页对象列表中的服务端 SHA-256 元数据批量核对，避免逐文件查询和下载未变化内容。
 - 完整连接、存储、失败恢复与验收设计见 [`google-drive-native-design.md`](google-drive-native-design.md)。
 
 ### QNAP NAS

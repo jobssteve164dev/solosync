@@ -40,7 +40,7 @@ Use **Restore File** when only one file is needed. You select the file from the 
 
 ## What is stored
 
-Snapshots use this structure inside your chosen location:
+Local folders and QNAP use the logical snapshot structure below:
 
 ```text
 SoloSync/<project-id>/
@@ -51,7 +51,19 @@ SoloSync/<project-id>/
 
 Each snapshot is logically complete, but its unchanged bytes are not copied again. The manifest maps every relative project path to a stable SHA-256 content object, so old and new snapshots remain independently restorable while a repeated unchanged snapshot uploads only its manifest. Snapshots created by older SoloSync versions with files inside each snapshot remain readable and restorable. The manifest never stores the original absolute workspace path.
 
-For an empty project or a small-file snapshot, the Google Drive path is kept below 30 sequential remote requests, which keeps the complete operation inside 30 seconds when a Drive request takes no more than one second and the account is not being throttled. Files up to 5 MiB use one multipart upload request; larger files retain resumable upload protection with 8 MiB chunks. Actual time for large or numerous changed files still depends on the bytes that must cross the network.
+Google Drive keeps the same logical model without creating a folder and a file named `manifest.json` for every automatic backup:
+
+```text
+SoloSync Backups/
+  Backup History/
+    <snapshot-time-and-id>.json    # compact records for every project
+  <project-name>/
+    <original-file-name.ext>       # one verified copy of each distinct content
+```
+
+The single **Backup History** folder contains the small records SoloSync needs for restore. Project folders remain readable instead of filling with timestamp folders. SHA-256 remains each content object's internal identity, while its visible Drive name keeps the original file name and extension. Existing hash-named objects are renamed when the corresponding content is next reused; the bytes are not uploaded again. Older snapshot folders remain readable and restorable but new backups do not create them.
+
+The tested Google Drive path uses at most 21 remote requests for the first empty backup including connection and first-time folder creation, 8 for an existing connected project with one changed small file, and 6 for an unchanged snapshot on the active connection. Reconnecting and then making an unchanged snapshot uses at most 14 requests in the same single-page model. The connection totals include parallel checks for earlier folders that another still-open SoloSync window may have written after a duplicate was merged. An occasional batched ID refill adds one request; SoloSync reserves 100 IDs at once so that refill is amortized. Unchanged objects are checked together using Drive's SHA-256 metadata instead of being downloaded one by one. Files up to 5 MiB use one multipart upload request; larger files retain resumable upload protection with 8 MiB chunks. Actual time for large or numerous changed files still depends on the bytes that must cross the network, and an object listing can require another request when it exceeds one Drive page.
 
 ## Defaults and exclusions
 

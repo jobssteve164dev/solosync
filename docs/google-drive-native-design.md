@@ -99,21 +99,21 @@ https://www.googleapis.com/auth/drive.file
 
 首次连接在用户的 My Drive 中创建可见文件夹。现有仓库传给 provider 的逻辑 key 都以 `SoloSync/` 开头；Google provider 把这一前缀直接挂载到根文件夹 ID，不再在根目录内重复创建第二层 `SoloSync`。
 
-Drive 的物理布局使用内容寻址：项目目录下只保留一份相同内容，快照目录只保存完整 manifest。`lifecycle` 属性区分未发布与已提交状态：
+Drive 的物理布局使用内容寻址，并把所有项目的小型快照记录集中到唯一历史目录。`lifecycle` 属性区分未发布与已提交状态：
 
 ```text
 SoloSync Backups/
+  Backup History/                   role=history, format=2（全局唯一）
+    <snapshot-time-and-id>.json     role=snapshot, format=2, lifecycle=staging|committed
   <project-name>/                   role=project, projectId=...
-    <sha256>                        role=object, logicalKeyHash=...（内容文件）
-    <snapshot-time-and-id>/         role=snapshot, lifecycle=staging|committed
-      manifest.json
+    <original-file-name.ext>        role=object, contentSha256=...（内容文件）
 ```
 
-`objects/<sha256>` 是 provider 的虚拟 key；Drive 中 object 直接位于 project folder 下。manifest 记录每个项目相对路径、元数据和 SHA-256，因此每个快照在恢复语义上仍然完整，但相同内容不会重复上传或占用多份空间。旧 format-1 snapshot 目录中的 `files/...` 保持可读、可校验和可恢复；新 format-2 snapshot 不再生成该目录。
+`objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。Drive 中 object 直接位于 project folder 下，并以该内容对应的原文件名和扩展名展示；新快照的 manifest 则直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。对象身份始终由稳定 Drive ID、logical key hash 和 `contentSha256` 决定，不依赖显示名；相同内容仍只保存一份。旧版已写入的纯哈希显示名会在该内容再次被快照引用时原地改名，不重新上传文件。旧 format-1 snapshot 目录以及 0.0.11 产生的快照目录保持可读、可校验和可恢复。
 
 根文件夹 ID 存入 `globalState`。即使用户在 Drive 中重命名或移动文件夹，SoloSync 仍按稳定 ID 访问。若 ID 不可用，则按 app-private `appProperties` 搜索；找不到时提示用户重新创建，不静默改用同名陌生文件夹。
 
-连接时分页查询根标记，按 `createdTime`、file ID 选择唯一 canonical root。只有实际发现重复根时才扫描其中的项目并执行归并；普通单根连接不再遍历所有项目和历史快照。若重复根含有 SoloSync 标记的项目目录，则先按下面的项目合并规则逐项移动到 canonical root 并回读验证。发现未知对象、ID 冲突或内容冲突时停止合并并进入“需要修复”，禁止自动删除或覆盖数据。
+连接时分页查询根标记，按 `createdTime`、file ID 选择唯一 canonical root。历史目录也参与确定性归并：若重复根或并发窗口产生多个 `Backup History`，先把记录按 project ID、snapshot ID、正文哈希和 lifecycle 收敛到 canonical root；相同正文但状态不同的记录保留 committed 版本。随后才归档重复历史目录和重复根。若重复根含有 SoloSync 标记的项目目录，则按下面的项目合并规则逐项移动到 canonical root 并回读验证。发现未知对象、ID 冲突或内容冲突时停止合并并进入“需要修复”，禁止自动删除或覆盖数据。
 
 项目目录按实际访问惰性解析并在扩展会话内缓存稳定 ID，避免同一备份反复逐层查询。若查询发现重复项目目录，再按 `createdTime`、file ID 确定 canonical 对象并进入归并流程；正常单项目路径不扫描无关历史。
 
@@ -122,16 +122,17 @@ SoloSync Backups/
 ```json
 {
   "product": "solosync",
-  "role": "root|project|snapshot|object|file",
-  "format": "1",
+  "role": "root|history|project|snapshot|object|file",
+  "format": "1|2",
   "projectId": "...",
   "snapshotId": "...",
   "logicalKeyHash": "...",
+  "contentSha256": "...",
   "lifecycle": "staging|committed"
 }
 ```
 
-字段按角色填写：root 不需要 project/snapshot/lifecycle，project 不需要 snapshot/lifecycle；object 填写 project ID 和 logical key hash 但不绑定单个 snapshot；snapshot 与旧格式子文件填写完整的 project ID、snapshot ID、logical key hash，snapshot 还必须填写 lifecycle。
+字段按角色填写：root/history 不需要 project/snapshot/lifecycle，project 不需要 snapshot/lifecycle；object 填写 project ID、logical key hash 和 content SHA-256，但不绑定单个 snapshot；snapshot record 与旧格式子文件填写完整的 project ID、snapshot ID、logical key hash，snapshot 还必须填写 lifecycle。根、项目、内容对象和旧快照使用既有 format 1；集中历史目录与直接 manifest record 使用 format 2。
 
 文件和文件夹始终以 Drive file ID 为身份，名称只用于用户可读展示，不作为唯一定位依据。
 
@@ -141,9 +142,9 @@ Drive 允许同一父目录下存在重名文件，所以每个逻辑 key 必须
 
 - provider 只接受 `SoloSync/` 下的逻辑 key；去掉此前缀后从根 folder ID 开始解析。
 - `appProperties` 增加不可逆的 `logicalKeyHash`，并同时校验父 folder ID、`role`、`projectId` 与 `snapshotId`。算法固定为：将仓库产生的 logical key 规范为 `/` 分隔的 POSIX 相对 key，拒绝 `.`、`..`、空段和反斜杠，对其原始 Unicode code point 与大小写不做宿主相关转换，再计算 UTF-8 字节的 SHA-256 小写十六进制；Windows、macOS、Linux 对同一 key 必须得到相同值。
-- 创建对象前调用 `files.generateIds` 预留 ID，将 ID 写入持久任务记录，再用该 ID 创建。请求响应丢失时先 `files.get(id)`；若对象存在且属性一致，视为创建已完成；不存在才重试创建。
+- 创建对象前通过一次 `files.generateIds(count=100)` 批量预留 ID；每个实际使用的 ID 分配后立即写入持久任务记录，再用该 ID 创建。请求响应丢失时先 `files.get(id)`；若对象存在且属性一致，视为创建已完成；不存在才重试创建。未使用的内存预留 ID 可在进程结束时自然丢弃，不对应任何远端文件。
 - 对不可变快照文件，一个逻辑 key 在任务生命周期内始终使用同一个预留 ID。若重试返回冲突，只接受属性完全匹配的该 ID，不能另建同名对象。
-- Google Drive backend 不创建共享可变的 `project.json`。项目列表、最近备份时间和历史始终从 canonical 项目目录下 `lifecycle=committed` 的 snapshot 与 manifest 派生，避免两个设备的读后写覆盖竞态。现有仓库读取 `project.json` 的快速路径对该 backend 关闭，使用已有的快照发现回退能力。
+- Google Drive backend 不创建共享可变的 `project.json`。项目列表、最近备份时间和历史始终从唯一 `Backup History` 下 `lifecycle=committed` 的 record 以及旧版项目快照目录共同派生，避免两个设备的读后写覆盖竞态。现有仓库读取 `project.json` 的快速路径对该 backend 关闭，使用已有的快照发现回退能力。
 - 如果任务私有对象查询出多个相同 `logicalKeyHash`，只能使用任务账本记录的 ID；没有可证明的 canonical ID 时，将连接标记为“需要修复”并阻止发布新快照。root/project 的共享对象使用前述确定性选主与验证后合并规则。禁止任意选一个、覆盖冲突对象或删除未经验证的数据。
 
 ### Provider 映射
@@ -153,15 +154,17 @@ Drive 允许同一父目录下存在重名文件，所以每个逻辑 key 必须
 - `createDirectory("SoloSync/<project>")`：以父 ID、role 和 logical key hash 幂等创建物理 project folder，并执行确定性选主。
 - `createDirectory("SoloSync/<project>/staging")` 与 `createDirectory("SoloSync/<project>/snapshots")`：先幂等确保 canonical project folder 已存在（覆盖当前仓库首次备份不会单独创建 project key 的调用顺序），再成功返回；对中间容器本身是虚拟 no-op，绝不创建这两个物理 folder。
 - `createDirectory("SoloSync/<project>/objects")`：确保 project folder 已存在后返回；objects 同样是虚拟容器。
-- `createDirectory("SoloSync/<project>/staging/<snapshot-id>")`：使用任务账本中的预留 ID，在 project folder 下直接创建 `lifecycle=staging` 的物理 snapshot folder。
-- `writeFile("SoloSync/<project>/objects/<sha256>")`：只在对象不存在时上传并回读 SHA-256；后续 snapshot 直接复用该稳定对象。
-- `exists/list(".../staging")`：只投影 canonical project folder 下 `lifecycle=staging` 的直接 snapshot 子目录；`exists/list(".../snapshots")` 只投影 `lifecycle=committed` 的直接 snapshot 子目录，并消费全部分页。
+- `createDirectory("SoloSync/<project>/staging/<snapshot-id>")`：确保唯一 `Backup History` 存在并为 manifest record 预留稳定 ID；该逻辑目录本身不创建物理 snapshot folder。
+- `writeFile("SoloSync/<project>/objects/<sha256>")`：只在对象不存在时上传，Drive 显示名使用原文件名和扩展名；上传响应和后续批量列表返回服务端 SHA-256，后续 snapshot 直接复用该稳定对象。
+- `reconcileFiles`：一次分页列出项目的全部内容对象，按 logical key hash 与 Drive 返回的 SHA-256 校验当前快照引用；新上传对象再执行一次同类列表确认。校验不再为每个未变化文件分别查询和下载正文。
+- `writeFile(".../staging/<snapshot-id>/manifest.json")`：直接在唯一 `Backup History` 下写入 `<snapshot-id>.json` record，保留同一预留 ID 用于响应丢失后的幂等恢复。
+- `exists/list(".../staging")`：把历史目录中 `lifecycle=staging` 的 format-2 records 与项目目录下旧版 staging snapshot folders 投影为统一逻辑目录；`exists/list(".../snapshots")` 同样合并 committed record 与旧目录，并消费全部分页。
 - `exists/list`、对象读写以及旧格式 `files/...` key 都通过 project ID、snapshot ID、lifecycle、logical key hash 和任务账本解析到稳定 Drive ID，不能按显示名遍历猜测。
 - `writeFile`：5 MiB 内使用单请求 multipart upload；更大文件使用 resumable upload，避免网络中断后整文件重传。
 - `openReadStream` / `downloadFile`：通过 `files.get?alt=media` 流式读取；仓库的远端 SHA-256 校验和恢复写盘都消费流，不能把大文件完整装入 `Buffer`。
 - `readSmallFile`：只用于 manifest 等有 1 MiB 上限的元数据；通用仓库在其他 backend 也可用它读取 `project.json`，Google backend 自身不创建该文件。超限立即报出可定位错误。
 - `list` / `exists`：限定父文件夹、`trashed=false` 和 app properties 查询，并消费全部 `nextPageToken`。
-- `move`：对稳定 snapshot folder ID 更新名称、canonical project parent 和 `lifecycle=committed`，把虚拟 staging key 发布为虚拟 snapshots key。
+- `move`：对稳定 manifest record（或旧版 snapshot folder）更新 `lifecycle=committed` 和 logical key hash，把虚拟 staging key 原子发布为虚拟 snapshots key。
 - `delete`：只允许删除已解析到 SoloSync 根目录以内的对象；禁止删除根目录。
 
 所有请求显式选择必要 `fields`。首版只支持 **My Drive**；Shared Drives 需要额外的文件夹选择、capabilities 和 `supportsAllDrives` 契约，不能在未验证前假装支持。
@@ -235,9 +238,10 @@ src/sensitiveFileReview.ts  云端备份前的敏感文件扫描与排除决策
 - “断开此设备”不影响另一台已登录设备；“撤销全部授权”经确认后让所有设备在下次访问时进入“需要重新登录”，两者都不删除备份。
 - 令牌刷新、`invalid_grant`、Workspace 管理员拒绝、403 两类限流、429、5xx、上传响应丢失、上传 session 过期、扩展重启和主动取消均有自动化测试。
 - 模拟同名对象、两台设备同时创建根/项目目录和同时为同一项目备份：不能任意选择重复对象，项目目录最终收敛到 canonical ID，两个有效 snapshot 都可发现，冲突对象不能被覆盖或删除。
-- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder；一个小文件的首个完整快照在一秒 Drive 往返模型下少于 30 个串行远端请求，重复未修改快照只新增 manifest。
-- Drive backend 不创建或依赖 `project.json`；项目列表、最近时间、历史与新设备恢复全部从 committed snapshots 派生。
-- 在上传第一个分块、中间分块、服务端已接收但客户端未收到响应、上传完成但发布前、发布成功但客户端未收到响应五个位置分别强制退出；重启后复用同一 snapshot ID 和稳定本地副本，从服务端 `Range` 或 snapshot folder ID 的实际状态恢复。
+- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder 与唯一历史目录；单页且无节流时，包含首次连接的全新空项目最多使用 21 个远端请求，活跃连接上的一个变化小文件使用 8 个，重复未修改快照使用 6 个，重连后执行未修改快照最多 14 个。连接请求包含可并行执行的已归并目录检查，用于收敛另一个仍在线的旧窗口发生的延迟写入。
+- Drive 中的新内容对象显示原文件名与扩展名；再次引用旧版纯哈希名称对象时只原地更新显示名，不重新上传内容。
+- Drive backend 不创建或依赖 `project.json`；项目列表、最近时间、历史与新设备恢复从 committed history records 与旧版 committed snapshot folders 合并派生。
+- 在上传第一个分块、中间分块、服务端已接收但客户端未收到响应、上传完成但发布前、发布成功但客户端未收到响应五个位置分别强制退出；重启后复用同一 snapshot ID、manifest record ID 和稳定本地副本，从服务端 `Range` 或稳定 Drive ID 的实际状态恢复。
 - 发布响应丢失后，已经标记 `committed` 的 snapshot 被识别为成功；随后点击取消也不能删除它。
 - 1 GB 单文件与 1 GB 项目均在受限内存环境完成上传、远端 SHA-256 校验和恢复；内存占用不得随单文件大小线性增长。预检发现磁盘不足或复制途中触发 `ENOSPC` 时都不得留下半份 pending；保留 pending 时设置页显示实际占用，继续/放弃后空间变化可核对。
 - 完成备份后，从一台没有原项目的新设备登录同一账号并恢复，逐文件 SHA-256 一致。

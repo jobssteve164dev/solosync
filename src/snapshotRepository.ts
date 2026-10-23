@@ -4,7 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, w
 import os from 'node:os';
 import path from 'node:path';
 import { isPathInsideDirectory } from './backupLocation';
-import { normalizeStorageKey, StorageProvider } from './storageProvider';
+import { normalizeStorageKey, StorageFileExpectation, StorageFileStatus, StorageProvider } from './storageProvider';
 import { SnapshotFile, SnapshotManifest, WorkspaceRoot } from './types';
 import { isCompatiblePendingDestination, PendingBackupJob, readPendingBackup, requirePendingCapacity, writePendingBackup } from './pendingBackup';
 import { isExcludedPath } from './exclusions';
@@ -144,38 +144,59 @@ async function uploadContentObjects(provider: StorageProvider, localSnapshotDire
   const objectsDirectory = storageKey('SoloSync', manifest.projectId, 'objects');
   await provider.createDirectory(objectsDirectory, options.signal);
   const uniqueFiles = [...new Map(manifest.files.map((file) => [file.sha256, file])).values()];
-  const pendingVerification: Array<{ file: SnapshotFile; remote: string; local: string; uploaded: boolean }> = [];
+  const expectations = uniqueFiles.map((file): StorageFileExpectation => ({
+    key: storageKey(objectsDirectory, file.sha256),
+    sha256: file.sha256,
+    displayName: path.posix.basename(file.path),
+  }));
+  const reconcile = async (items: StorageFileExpectation[]): Promise<Map<string, StorageFileStatus>> => {
+    if (provider.reconcileFiles) return provider.reconcileFiles(items, options.signal);
+    const statuses = new Map<string, StorageFileStatus>();
+    for (const item of items) {
+      statuses.set(item.key, !(await provider.exists(item.key, options.signal))
+        ? 'missing'
+        : await provider.hashFile(item.key, options.signal) === item.sha256 ? 'valid' : 'invalid');
+    }
+    return statuses;
+  };
+  const initial = await reconcile(expectations);
+  let uploaded = 0;
   let reused = 0;
+  const uploadedKeys = new Set<string>();
   options.onProgress?.({ phase: 'uploading', completed: 0, total: uniqueFiles.length, reused });
   for (const [index, file] of uniqueFiles.entries()) {
     throwIfCancelled(options.signal);
-    const remote = storageKey(objectsDirectory, file.sha256);
+    const expectation = expectations[index];
+    const remote = expectation.key;
     const local = path.join(localSnapshotDirectory, 'files', file.root, ...file.path.split('/'));
-    if (await provider.exists(remote, options.signal)) {
+    const status = initial.get(remote) ?? 'missing';
+    if (status === 'valid') {
       reused += 1;
-      pendingVerification.push({ file, remote, local, uploaded: false });
     } else {
+      if (status === 'invalid') await provider.delete(remote, options.signal);
       await provider.writeFile(remote, local, options.signal);
-      pendingVerification.push({ file, remote, local, uploaded: true });
+      uploadedKeys.add(remote);
+      uploaded += 1;
     }
     options.onProgress?.({ phase: 'uploading', completed: index + 1, total: uniqueFiles.length, reused, current: file.path });
   }
-  options.onProgress?.({ phase: 'verifying', completed: 0, total: pendingVerification.length });
-  for (const [index, item] of pendingVerification.entries()) {
-    let verified = await provider.hashFile(item.remote, options.signal) === item.file.sha256;
-    if (!verified && !item.uploaded) {
-      await provider.delete(item.remote, options.signal);
-      await provider.writeFile(item.remote, item.local, options.signal);
-      verified = await provider.hashFile(item.remote, options.signal) === item.file.sha256;
+  options.onProgress?.({ phase: 'verifying', completed: 0, total: uniqueFiles.length });
+  const verified = uploaded > 0 ? await reconcile(expectations) : initial;
+  await Promise.all(expectations.map(async (expectation) => {
+    if (verified.get(expectation.key) !== 'missing' || !uploadedKeys.has(expectation.key)) return;
+    try {
+      verified.set(expectation.key, await provider.hashFile(expectation.key, options.signal) === expectation.sha256 ? 'valid' : 'invalid');
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
     }
-    if (!verified) {
-      await provider.delete(item.remote).catch(() => undefined);
-      throw new Error(`The uploaded copy of ${item.file.path} failed verification.`);
+  }));
+  for (const [index, file] of uniqueFiles.entries()) {
+    const expectation = expectations[index];
+    if (verified.get(expectation.key) !== 'valid') {
+      await provider.delete(expectation.key).catch(() => undefined);
+      throw new Error(`The uploaded copy of ${file.path} failed verification.`);
     }
-    options.onProgress?.({ phase: 'verifying', completed: index + 1, total: pendingVerification.length });
-  }
-  if (pendingVerification.length === 0) {
-    options.onProgress?.({ phase: 'verifying', completed: 0, total: 0 });
+    options.onProgress?.({ phase: 'verifying', completed: index + 1, total: uniqueFiles.length });
   }
 }
 
@@ -351,7 +372,7 @@ export class SnapshotRepository {
         });
       };
       await updatePendingState('uploading');
-      if (options.pendingDirectory && await options.provider.exists(finalDirectory, options.signal)) {
+      if (resumedManifest && options.pendingDirectory && await options.provider.exists(finalDirectory, options.signal)) {
         const committedManifest = parseManifest(await options.provider.readFile(storageKey(finalDirectory, 'manifest.json'), options.signal));
         if (JSON.stringify(committedManifest) !== JSON.stringify(readyManifest)) {
           throw new Error('The published Google Drive snapshot does not match the pending backup.');
@@ -377,7 +398,7 @@ export class SnapshotRepository {
         options.onProgress?.({ phase: 'uploading', completed: readyManifest.files.length, total: readyManifest.files.length, reused: 0 });
       }
       const uploadedManifest = parseManifest(await options.provider.readFile(storageKey(stagingDirectory, 'manifest.json'), options.signal));
-      if (uploadedManifest.snapshotId !== readyManifest.snapshotId || uploadedManifest.projectId !== readyManifest.projectId || uploadedManifest.files.length !== readyManifest.files.length) {
+      if (JSON.stringify(uploadedManifest) !== JSON.stringify(readyManifest)) {
         throw new Error('The backup location returned an incomplete snapshot manifest.');
       }
       if (readyManifest.formatVersion === 1) {

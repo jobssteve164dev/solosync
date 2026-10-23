@@ -42,6 +42,40 @@ test('lists all Drive pages with an authenticated app-property query', async () 
   assert.equal(requests[0].authorization, 'Bearer access-token');
   assert.match(requests[0].url.searchParams.get('q'), /'parent' in parents/);
   assert.match(requests[0].url.searchParams.get('q'), /project\\'1/);
+  assert.match(requests[0].url.searchParams.get('fields'), /sha256Checksum/);
+});
+
+test('reserves Drive IDs in one batch for consecutive creates', async () => {
+  const requests = [];
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async (input) => {
+      requests.push(new URL(String(input)));
+      return Response.json({ ids: Array.from({ length: 100 }, (_, index) => `id-${index + 1}`) });
+    },
+  });
+
+  assert.deepEqual(await Promise.all([client.generateId(), client.generateId(), client.generateId()]), ['id-1', 'id-2', 'id-3']);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].searchParams.get('count'), '100');
+});
+
+test('continues with another Drive ID batch when concurrent creates exhaust the first one', async () => {
+  let requestCount = 0;
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async () => {
+      requestCount += 1;
+      return Response.json({ ids: Array.from({ length: 100 }, (_, index) => `batch-${requestCount}-id-${index + 1}`) });
+    },
+  });
+
+  const ids = await Promise.all(Array.from({ length: 101 }, () => client.generateId()));
+
+  assert.equal(new Set(ids).size, 101);
+  assert.equal(requestCount, 2);
 });
 
 test('uploads a small file and its metadata in one multipart request', async () => {

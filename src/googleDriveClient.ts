@@ -25,7 +25,7 @@ interface GoogleDriveClientOptions {
 const driveApi = 'https://www.googleapis.com/drive/v3';
 const driveUploadApi = 'https://www.googleapis.com/upload/drive/v3';
 const folderMimeType = 'application/vnd.google-apps.folder';
-const itemFields = 'id,name,mimeType,parents,appProperties,createdTime,size,trashed';
+const itemFields = 'id,name,mimeType,parents,appProperties,createdTime,size,sha256Checksum,trashed';
 const chunkSize = 8 * 1024 * 1024;
 const multipartLimit = 5 * 1024 * 1024;
 const metadataLimit = 1024 * 1024;
@@ -40,6 +40,8 @@ function sessionKey(item: { id: string; appProperties?: Record<string, string> }
 
 export class GoogleDriveClient implements GoogleDriveApi {
   private readonly fetchImpl: typeof fetch;
+  private readonly generatedIds: string[] = [];
+  private generatedIdsRequest?: Promise<void>;
 
   constructor(private readonly options: GoogleDriveClientOptions) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -115,10 +117,18 @@ export class GoogleDriveClient implements GoogleDriveApi {
   }
 
   async generateId(signal?: AbortSignal): Promise<string> {
-    const response = await this.request(`${driveApi}/files/generateIds?count=1&space=drive&type=files`, { signal });
-    const body = await response.json() as { ids?: string[] };
-    if (!body.ids?.[0]) throw new Error('Google Drive did not reserve a file ID.');
-    return body.ids[0];
+    while (this.generatedIds.length === 0) {
+      this.generatedIdsRequest ??= (async () => {
+        const response = await this.request(`${driveApi}/files/generateIds?count=100&space=drive&type=files`, { signal });
+        const body = await response.json() as { ids?: string[] };
+        if (!body.ids?.length) throw new Error('Google Drive did not reserve file IDs.');
+        this.generatedIds.push(...body.ids);
+      })().finally(() => {
+        this.generatedIdsRequest = undefined;
+      });
+      await this.generatedIdsRequest;
+    }
+    return this.generatedIds.shift()!;
   }
 
   async listChildren(parentId: string, properties: Record<string, string> = {}, signal?: AbortSignal): Promise<GoogleDriveItem[]> {
