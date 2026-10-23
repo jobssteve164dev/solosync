@@ -120,6 +120,20 @@ jobs:
                 error.edgeBlocked = health.status === 403;
                 throw error;
               }
+              const publicPages = [
+                ['/', 'Back up what Git hasn’t protected yet.'],
+                ['/privacy', 'Google API Services User Data Policy'],
+                ['/terms', 'Terms of Service'],
+              ];
+              for (const [path, expectedText] of publicPages) {
+                const page = await fetch(`https://solosync.szlk.uk${path}`, { cache: 'no-store', headers });
+                const body = await page.text();
+                if (!page.ok || !page.headers.get('content-type')?.startsWith('text/html') || !body.includes(expectedText)) {
+                  const error = new Error(`Public page verification failed for ${path} (${page.status}).`);
+                  error.edgeBlocked = page.status === 403;
+                  throw error;
+                }
+              }
               const response = await fetch('https://solosync.szlk.uk/v1/auth/start', {
                 method: 'POST',
                 headers: { ...headers, 'content-type': 'application/json' },

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.8
+
+- Publish a dedicated SoloSync home page, privacy policy, and terms of service at `solosync.szlk.uk`.
+- Explain the exact Google Drive data path, `drive.file` permission, credential storage, retention controls, and readable-backup boundary.
+- Keep the public legal pages on the same domain as the Google OAuth callback.
+
 ## 0.0.7
 
 - Connect Google Drive directly with browser-based Google sign-in and the least-privilege `drive.file` permission; no local sync folder is required.

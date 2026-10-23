@@ -108,9 +108,9 @@ export class GoogleDriveClient implements GoogleDriveApi {
     return response;
   }
 
-  async about(signal?: AbortSignal): Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string }; storageQuota?: { limit?: string; usage?: string } }> {
-    const response = await this.request(`${driveApi}/about?fields=user(permissionId,displayName,emailAddress),storageQuota(limit,usage)`, { signal });
-    return response.json() as Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string }; storageQuota?: { limit?: string; usage?: string } }>;
+  async about(signal?: AbortSignal): Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string } }> {
+    const response = await this.request(`${driveApi}/about?fields=user(permissionId,displayName,emailAddress)`, { signal });
+    return response.json() as Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string } }>;
   }
 
   async generateId(signal?: AbortSignal): Promise<string> {

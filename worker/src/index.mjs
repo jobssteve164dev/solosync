@@ -1,3 +1,5 @@
+import { publicSiteResponse } from './site.mjs';
+
 const googleAuthorizationEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth';
 const googleTokenEndpoint = 'https://oauth2.googleapis.com/token';
 const googleRevokeEndpoint = 'https://oauth2.googleapis.com/revoke';
@@ -237,6 +239,8 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: json({}).headers });
     const url = new URL(request.url);
     try {
+      const siteResponse = publicSiteResponse(request, url.pathname);
+      if (siteResponse) return siteResponse;
       if (request.method === 'GET' && url.pathname === '/health') {
         requireOAuthConfiguration(env);
         publicOrigin(env);

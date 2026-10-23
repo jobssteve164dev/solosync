@@ -14,7 +14,7 @@ export interface GoogleDriveItem {
 }
 
 export interface GoogleDriveApi {
-  about(signal?: AbortSignal): Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string }; storageQuota?: { limit?: string; usage?: string } }>;
+  about(signal?: AbortSignal): Promise<{ user: { permissionId?: string; displayName?: string; emailAddress?: string } }>;
   generateId(signal?: AbortSignal): Promise<string>;
   listFolders(properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;
   listChildren(parentId: string, properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;

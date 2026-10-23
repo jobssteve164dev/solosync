@@ -27,6 +27,56 @@ test('deployment preserves dashboard-managed public OAuth variables', async () =
   assert.equal(config.keep_vars, true);
 });
 
+test('serves the public SoloSync site and Google-ready legal pages', async () => {
+  const pages = await Promise.all([
+    worker.fetch(new Request('https://solosync.szlk.uk/'), environment()),
+    worker.fetch(new Request('https://solosync.szlk.uk/privacy'), environment()),
+    worker.fetch(new Request('https://solosync.szlk.uk/terms'), environment()),
+  ]);
+
+  for (const response of pages) {
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/html/);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
+  }
+
+  const home = await pages[0].text();
+  assert.match(home, /SoloSync/);
+  assert.match(home, /Back up what Git hasn.t protected yet/i);
+  assert.match(home, /href="\/privacy"/);
+  assert.match(home, /href="\/terms"/);
+  assert.match(home, /Full snapshots restore into a new folder/);
+  assert.match(home, /individual files go to the save location you choose/);
+  assert.match(home, /A full restore never targets your current folder/);
+
+  const privacy = await pages[1].text();
+  assert.match(privacy, /Google Drive/i);
+  assert.match(privacy, /drive\.file/);
+  assert.match(privacy, /accesses, uses, stores, and shares Google user data/i);
+  assert.match(privacy, /Google API Services User Data Policy/i);
+  assert.match(privacy, /Limited Use/i);
+  assert.match(privacy, /complete sign-in, refresh access, and revoke the connection/i);
+  assert.match(privacy, /does not persist those credentials in a database/i);
+  assert.match(privacy, /Desktop VS Code stores the Google refresh token in VS Code Secret Storage/i);
+  assert.match(privacy, /Browser-hosted and remote VS Code store only the encrypted opaque credential/i);
+
+  const terms = await pages[2].text();
+  assert.match(terms, /Terms of Service/i);
+  assert.match(terms, /readable files/i);
+});
+
+test('serves the official icon and crawl instructions from the public origin', async () => {
+  const icon = await worker.fetch(new Request('https://solosync.szlk.uk/icon.svg'), environment());
+  assert.equal(icon.status, 200);
+  assert.equal(icon.headers.get('content-type'), 'image/svg+xml; charset=utf-8');
+  assert.match(await icon.text(), /<svg/);
+
+  const robots = await worker.fetch(new Request('https://solosync.szlk.uk/robots.txt'), environment());
+  assert.equal(robots.status, 200);
+  assert.equal(await robots.text(), 'User-agent: *\nAllow: /\n');
+});
+
 test('exchanges a PKCE-bound callback code without exposing the refresh token', async () => {
   const env = environment();
   const tokenRequests = [];

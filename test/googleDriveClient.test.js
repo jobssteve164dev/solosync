@@ -15,6 +15,7 @@ test('requests the stable Google permission ID for account identity', async () =
 
   assert.equal((await client.about()).user.permissionId, 'permission-user-a');
   assert.match(requested.searchParams.get('fields'), /permissionId/);
+  assert.doesNotMatch(requested.searchParams.get('fields'), /storageQuota/);
 });
 
 test('lists all Drive pages with an authenticated app-property query', async () => {

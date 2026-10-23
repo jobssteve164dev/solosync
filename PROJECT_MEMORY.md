@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.6` adds native QNAP backup over HTTPS while preserving local and mounted-folder storage.
+- Current stage: Version `0.0.8` adds the dedicated public home, privacy, and terms pages required for the production Google connection.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -15,7 +15,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 
 - SoloSync is versioned backup, not bidirectional file synchronization.
 - Full restore writes to a new directory and does not overwrite the open workspace.
-- Storage backends share one snapshot repository contract. The production backends are filesystem directories and native QNAP HTTPS/WebDAV connections.
+- Storage backends share one snapshot repository contract. The production backends are filesystem directories, native QNAP HTTPS/WebDAV connections, and Google Drive.
 - QNAP credentials use a dedicated least-privilege NAS account. The password is stored in VS Code SecretStorage and is never written to extension settings or snapshot manifests.
 - Marketplace credentials are stored as encrypted GitHub Actions Secrets in the SoloSync repository so the project publishes independently.
 - A push to `main` automatically publishes an unreleased `package.json` version to Visual Studio Marketplace and Open VSX, then creates the matching tag and GitHub Release. Existing complete releases are skipped, while interrupted draft or missing-asset releases resume from the frozen release commit.
@@ -29,7 +29,8 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - The backup source is the single project folder explicitly selected by the user; SoloSync does not infer or fall back to the VS Code workspace root.
 - Snapshot scanning and copying accept cancellation and report progress. Cancellation or failure removes only the staging directory created by that run and never publishes it as a snapshot.
 - Native QNAP backups stage files locally, upload into a remote staging directory, read every file back for SHA-256 verification, then publish with WebDAV MOVE. Discovery and restore work without the original project folder.
-- Native Google Drive OAuth remains unimplemented; its implementation-ready product, authorization, storage, resumability, security, and acceptance design is documented in `docs/google-drive-native-design.md`. The first releasable auth topology is Desktop OAuth with system browser, PKCE, and loopback; remote/code-server Device Flow remains gated on Google confirmation and production verification.
+- Native Google Drive uses `drive.file`, resumable direct uploads, and PKCE. Desktop VS Code uses a loopback callback; browser-hosted VS Code uses the HTTPS broker at `solosync.szlk.uk`, which returns an encrypted opaque credential and never proxies backup contents.
+- The same Cloudflare Worker serves the public SoloSync home page at `/`, privacy policy at `/privacy`, terms at `/terms`, and OAuth callback at `/oauth/google/callback`.
 - Client-side encryption, retention, and incremental content-addressed storage remain later milestones documented in `docs/product-design.md`.
 
 ## Verification
@@ -46,6 +47,6 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - `SZLK.solosync@0.0.4` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX.
 - `0.0.4` allows a dedicated backup folder inside a broader VS Code workspace and excludes that folder from snapshot scans and idle-backup triggers; only choosing an actual workspace root itself remains blocked.
 - `0.0.3` added sidebar setup and settings entry points, guided Google Drive desktop-folder / mounted NAS / local-drive choices, location availability validation, and recoverable empty states.
-- Native Google Drive OAuth is still not implemented; Google Drive continues to require a synchronized desktop folder. The documented target experience removes that folder picker, auto-creates `SoloSync Backups`, uses `drive.file`, persists resumable backup jobs across restarts, and distinguishes local disconnect from account-wide authorization revocation; see `docs/google-drive-native-design.md`.
+- `0.0.7` added native Google Drive backup, a visible `SoloSync Backups` folder, direct resumable transfers, verified restore, and one connection flow across desktop and browser-hosted VS Code.
 - Icon rendering is generated with resvg and protected by a pixel-level regression test.
 - Continue from `/home/ubuntu/project/solosync`; do not recreate the project under `.solomap-global/memory/inbox`.

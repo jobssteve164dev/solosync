@@ -3,6 +3,7 @@ out/
 *.vsix
 .vscode-test/
 coverage/
+worker/.wrangler/
 .env
 .env.*
 !.env.example
