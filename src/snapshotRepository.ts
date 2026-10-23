@@ -523,6 +523,15 @@ export class SnapshotRepository {
     return manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  async latest(provider: StorageProvider, projectId: string, signal?: AbortSignal): Promise<SnapshotManifest | undefined> {
+    if (!provider.readLatestCommittedManifest) return (await this.list(provider, projectId, signal))[0];
+    const contents = await provider.readLatestCommittedManifest(projectId, signal);
+    if (!contents) return undefined;
+    const manifest = parseManifest(contents);
+    if (manifest.projectId !== projectId) throw new Error('The latest snapshot manifest belongs to a different project.');
+    return manifest;
+  }
+
   async verify(provider: StorageProvider, manifest: SnapshotManifest): Promise<{ valid: boolean; checked: number; errors: string[] }> {
     const errors: string[] = [];
     for (const file of manifest.files) {

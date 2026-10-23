@@ -49,6 +49,15 @@ class MemoryDriveApi {
       && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value));
   }
 
+  async listNewest(type, properties = {}) {
+    this.calls.push('listNewest');
+    const isFolder = (item) => item.mimeType === 'application/vnd.google-apps.folder';
+    return [...this.items.values()].filter((item) => !item.trashed && (type === 'folder' ? isFolder(item) : !isFolder(item))
+      && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value))
+      .sort((left, right) => right.name.localeCompare(left.name))
+      .slice(0, 2);
+  }
+
   async listFiles(properties = {}) {
     this.calls.push('listFiles');
     return [...this.items.values()].filter((item) => !item.trashed && item.mimeType !== 'application/vnd.google-apps.folder'
@@ -224,6 +233,65 @@ test('stores automatic backup history as records in one stable folder instead of
   assert.ok(records.every((item) => item.parents.includes(historyFolders[0].id)));
   assert.ok(records.every((item) => item.name.endsWith('.json') && item.name !== 'manifest.json'));
   assert.deepEqual((await repository.list(provider, 'compact-history')).map((item) => item.snapshotId), records.map((item) => item.appProperties.snapshotId).sort().reverse());
+});
+
+test('reads only the newest committed manifest with a fixed request count across compact history', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-latest-manifest-'));
+  const workspace = path.join(temp, 'workspace');
+  const pending = path.join(temp, 'pending');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const writer = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  let newest;
+  for (let index = 0; index < 20; index += 1) {
+    newest = await repository.create({
+      provider: writer,
+      projectId: 'latest-manifest',
+      projectName: 'Latest Manifest',
+      roots: [{ name: 'workspace', path: workspace }],
+      excludes: [],
+      reviewedSensitivePaths: [],
+      pendingDirectory: pending,
+      pendingDestinationIdentity: writer.destinationIdentity,
+      reason: `Snapshot ${index}`,
+      git: { dirty: false },
+    });
+  }
+  const reader = await GoogleDriveProvider.connect(api);
+  api.calls = [];
+
+  const contents = await reader.readLatestCommittedManifest('latest-manifest');
+
+  assert.equal(JSON.parse(contents.toString()).snapshotId, newest.snapshotId);
+  assert.deepEqual(api.calls, ['listNewest', 'listNewest', 'readFile']);
+});
+
+test('reads the latest legacy folder manifest through the same bounded contract', async () => {
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const projectId = 'legacy-latest';
+  const snapshotId = '2026-10-23T00-00-00-000Z_legacy';
+  await provider.createDirectory(`SoloSync/${projectId}/staging`);
+  const project = [...api.items.values()].find((item) => item.appProperties.role === 'project' && item.appProperties.projectId === projectId);
+  await api.createFolder({
+    id: 'legacy-latest-folder',
+    name: snapshotId,
+    parents: [project.id],
+    appProperties: { product: 'solosync', role: 'snapshot', format: '1', projectId, snapshotId, lifecycle: 'staging' },
+  });
+  const manifest = { formatVersion: 1, snapshotId, projectId, projectName: 'Legacy Latest', createdAt: '2026-10-23T00:00:00.000Z', reason: 'Legacy', roots: [{ name: 'workspace' }], git: { dirty: false }, files: [] };
+  await provider.writeFile(`SoloSync/${projectId}/staging/${snapshotId}/manifest.json`, Buffer.from(JSON.stringify(manifest)));
+  await provider.move(`SoloSync/${projectId}/staging/${snapshotId}`, `SoloSync/${projectId}/snapshots/${snapshotId}`);
+  const reader = await GoogleDriveProvider.connect(api);
+  api.calls = [];
+
+  const contents = await reader.readLatestCommittedManifest(projectId);
+
+  assert.deepEqual(JSON.parse(contents.toString()), manifest);
+  assert.deepEqual(api.calls, ['listNewest', 'listNewest', 'listChildren', 'readFile']);
 });
 
 test('an already connected window sees history first created by another window', async (t) => {
@@ -552,6 +620,55 @@ test('keeps workspace root folders when a project contains multiple roots', asyn
   assert.equal(current.length, 2);
   assert.deepEqual(current.map((item) => api.items.get(item.parents[0]).name).sort(), ['backend', 'frontend']);
   assert.equal(new Set(current.map((item) => item.appProperties.sourcePathHash)).size, 2);
+});
+
+test('lists only current SoloSync files for the sidebar in one batched Drive read', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-file-browser-'));
+  const workspace = path.join(temp, 'workspace');
+  const sourceDirectory = path.join(workspace, 'src');
+  await mkdir(workspace);
+  await mkdir(sourceDirectory);
+  await writeFile(path.join(workspace, 'README.md'), 'readme');
+  await writeFile(path.join(sourceDirectory, 'index.ts'), 'index');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'file-browser',
+    projectName: 'Workspace',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'File browser',
+    git: { dirty: true },
+  });
+  await api.uploadFile({
+    id: 'not-current-history-file',
+    name: 'old.txt',
+    parents: [],
+    appProperties: { product: 'solosync', role: 'object', format: '1', projectId: 'file-browser' },
+  }, Buffer.from('old'));
+  api.calls = [];
+
+  assert.equal(typeof provider.listBackedUpFiles, 'function');
+  const projects = await provider.listBackedUpFiles();
+
+  assert.deepEqual(projects.map((project) => ({
+    projectId: project.projectId,
+    name: project.name,
+    files: project.files.map((file) => ({ path: file.path, size: file.size, externalUri: file.externalUri })),
+  })), [{
+    projectId: 'file-browser',
+    name: 'Workspace',
+    files: [
+      { path: 'README.md', size: 6, externalUri: `https://drive.google.com/open?id=${projects[0].files[0].id}` },
+      { path: 'src/index.ts', size: 5, externalUri: `https://drive.google.com/open?id=${projects[0].files[1].id}` },
+    ],
+  }]);
+  assert.equal(projects[0].files[1].sourcePathHash, createHash('sha256').update('workspace/src/index.ts').digest('hex'));
+  assert.deepEqual(api.calls, ['listChildren', 'listFolders', 'listFiles']);
 });
 
 test('replaces the visible Drive file when the same source path changes and keeps both snapshots restorable', async (t) => {

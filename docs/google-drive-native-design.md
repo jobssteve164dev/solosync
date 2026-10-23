@@ -116,6 +116,8 @@ SoloSync Backups/
 
 `objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。不可变 object 从创建起就位于 `Backup History/Previous File Versions`，相同内容只保存一份并供所有历史快照恢复。project folder 里的 `current` 是独立的用户可读副本：单根项目直接镜像根内相对路径，多根项目才保留各 workspace root 名称，所以既不重复单一根目录，也不会让不同根的同名路径冲突。来源身份仍由完整 root + 相对路径计算，布局迁移不会改变稳定 Drive ID。内容变化在 snapshot 发布后通过 `files.update` 原位替换，不新增同名当前文件。新快照 manifest 直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。0.0.13 的冗余单根目录在下次备份时整体移动到 `Backup History` 并标记为旧布局，目录中任何额外内容都会原样保留，不根据当前权限范围内的“空目录”判断执行删除。0.0.12 留在 project folder 的 object 会在下次备份迁移进文件历史。旧 format-1 snapshot 目录保持可读、可校验和可恢复。
 
+侧边栏的 **Backup Files** 只展示上述 project folder 中的当前可读副本，不展示内部历史 record、不可变 object 或用户云盘中的其他文件。首次展开或手动刷新时，provider 并行分页读取 project、current-directory 与 current 三类对象，在扩展内重建“项目 → 文件夹 → 文件”树；目录深度不会增加请求次数，后台不轮询。文件可从最新 committed snapshot 恢复，也可通过稳定 Drive ID 在浏览器中打开。恢复当前格式的文件时只用两次元数据查询定位最新 committed snapshot，再读取一份 manifest，共固定三次请求，不随历史快照数增加；旧格式文件夹快照额外查询一次 manifest 子项后读取，仍为固定四次。此功能继续只使用 `drive.file`。
+
 根文件夹 ID 存入 `globalState`。即使用户在 Drive 中重命名或移动文件夹，SoloSync 仍按稳定 ID 访问。若 ID 不可用，则按 app-private `appProperties` 搜索；找不到时提示用户重新创建，不静默改用同名陌生文件夹。
 
 连接时分页查询根标记，按 `createdTime`、file ID 选择唯一 canonical root。历史目录也参与确定性归并：若重复根或并发窗口产生多个 `Backup History`，先把记录按 project ID、snapshot ID、正文哈希和 lifecycle 收敛到 canonical root；相同正文但状态不同的记录保留 committed 版本。随后才归档重复历史目录和重复根。若重复根含有 SoloSync 标记的项目目录，则按下面的项目合并规则逐项移动到 canonical root 并回读验证。发现未知对象、ID 冲突或内容冲突时停止合并并进入“需要修复”，禁止自动删除或覆盖数据。

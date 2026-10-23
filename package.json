@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync",
   "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -29,12 +29,16 @@
   ],
   "activationEvents": [
     "onView:solosync.history",
+    "onView:solosync.files",
     "onStartupFinished",
     "onCommand:solosync.setup",
     "onCommand:solosync.configureSource",
     "onCommand:solosync.configure",
     "onCommand:solosync.openSettings",
     "onCommand:solosync.showLogs",
+    "onCommand:solosync.refreshFiles",
+    "onCommand:solosync.restoreBackedUpFile",
+    "onCommand:solosync.openBackedUpFile",
     "onCommand:solosync.backupNow",
     "onCommand:solosync.cancelBackup",
     "onCommand:solosync.browseBackups",
@@ -77,6 +81,24 @@
         "title": "SoloSync: Show Backup Logs",
         "category": "SoloSync",
         "icon": "$(output)"
+      },
+      {
+        "command": "solosync.refreshFiles",
+        "title": "SoloSync: Refresh Backup Files",
+        "category": "SoloSync",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "solosync.restoreBackedUpFile",
+        "title": "SoloSync: Restore File",
+        "category": "SoloSync",
+        "icon": "$(desktop-download)"
+      },
+      {
+        "command": "solosync.openBackedUpFile",
+        "title": "SoloSync: Open in Google Drive",
+        "category": "SoloSync",
+        "icon": "$(link-external)"
       },
       {
         "command": "solosync.backupNow",
@@ -148,6 +170,10 @@
         {
           "id": "solosync.history",
           "name": "Backup History"
+        },
+        {
+          "id": "solosync.files",
+          "name": "Backup Files"
         }
       ]
     },
@@ -176,9 +202,34 @@
         "view": "solosync.history",
         "contents": "SoloSync is ready.\n[Create First Backup](command:solosync.backupNow)\n[Change Setup](command:solosync.setup)",
         "when": "solosync.hasSourceDirectory && solosync.sourceDirectoryAvailable && solosync.hasBackupLocation && solosync.backupLocationAvailable"
+      },
+      {
+        "view": "solosync.files",
+        "contents": "Connect Google Drive to browse files protected by SoloSync.\n[Connect Google Drive](command:solosync.connectGoogleDrive)",
+        "when": "!solosync.usingGoogleDrive || !solosync.googleDriveConnected"
+      },
+      {
+        "view": "solosync.files",
+        "contents": "Google Drive is unavailable. Reconnect to browse your backed-up files.\n[Reconnect Google Drive](command:solosync.connectGoogleDrive)",
+        "when": "solosync.usingGoogleDrive && solosync.googleDriveConnected && !solosync.backupLocationAvailable"
+      },
+      {
+        "view": "solosync.files",
+        "contents": "No backed-up files were found.\n[Back Up Now](command:solosync.backupNow)",
+        "when": "solosync.usingGoogleDrive && solosync.googleDriveConnected && solosync.backupLocationAvailable"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "solosync.restoreBackedUpFile",
+          "when": "false"
+        },
+        {
+          "command": "solosync.openBackedUpFile",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "solosync.setup",
@@ -204,6 +255,11 @@
           "command": "solosync.browseBackups",
           "when": "view == solosync.history",
           "group": "navigation@4"
+        },
+        {
+          "command": "solosync.refreshFiles",
+          "when": "view == solosync.files",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -221,6 +277,16 @@
           "command": "solosync.verifySnapshot",
           "when": "view == solosync.history && viewItem == solosync.snapshot",
           "group": "inline@3"
+        },
+        {
+          "command": "solosync.restoreBackedUpFile",
+          "when": "view == solosync.files && viewItem == solosync.backedUpFile",
+          "group": "inline@1"
+        },
+        {
+          "command": "solosync.openBackedUpFile",
+          "when": "view == solosync.files && viewItem == solosync.backedUpFile",
+          "group": "inline@2"
         }
       ],
       "explorer/context": [

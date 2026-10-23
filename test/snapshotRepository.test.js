@@ -15,6 +15,36 @@ async function removeTreePrecisely(directory) {
   await rmdir(directory);
 }
 
+test('reads the latest snapshot through a provider fast path without listing history', async () => {
+  const manifest = {
+    formatVersion: 2,
+    snapshotId: '2026-10-23T00-00-00-000Z_latest',
+    projectId: 'latest-project',
+    projectName: 'Latest Project',
+    createdAt: '2026-10-23T00:00:00.000Z',
+    reason: 'Test',
+    roots: [{ name: 'workspace' }],
+    git: { dirty: false },
+    files: [],
+  };
+  let fastPathCalls = 0;
+  const provider = {
+    readLatestCommittedManifest: async (projectId) => {
+      fastPathCalls += 1;
+      assert.equal(projectId, manifest.projectId);
+      return Buffer.from(JSON.stringify(manifest));
+    },
+    exists: async () => { throw new Error('history listing must not run'); },
+    list: async () => { throw new Error('history listing must not run'); },
+    readFile: async () => { throw new Error('history listing must not run'); },
+  };
+
+  const latest = await new SnapshotRepository().latest(provider, manifest.projectId);
+
+  assert.equal(fastPathCalls, 1);
+  assert.deepEqual(latest, manifest);
+});
+
 test('reuses one stable content object across unchanged snapshots', async (t) => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-incremental-'));
   t.after(() => removeTreePrecisely(temp));

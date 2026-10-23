@@ -67,6 +67,30 @@ test('lists content objects across current and historical parents by app propert
   assert.match(request.searchParams.get('q'), /key='projectId' and value='project-1'/);
 });
 
+test('reads only the newest matching Drive item without following pagination', async () => {
+  const requests = [];
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async (input) => {
+      const request = new URL(String(input));
+      requests.push(request);
+      return Response.json({
+        nextPageToken: 'must-not-be-followed',
+        files: [{ id: 'newest', name: '2026-newest.json', mimeType: 'application/octet-stream', parents: ['history'], appProperties: { product: 'solosync', role: 'snapshot' } }],
+      });
+    },
+  });
+
+  const newest = await client.listNewest('file', { product: 'solosync', role: 'snapshot', projectId: 'project-1' });
+
+  assert.deepEqual(newest.map((item) => item.id), ['newest']);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].searchParams.get('pageSize'), '2');
+  assert.equal(requests[0].searchParams.get('orderBy'), 'name desc');
+  assert.match(requests[0].searchParams.get('q'), /mimeType != 'application\/vnd\.google-apps\.folder'/);
+});
+
 test('reserves Drive IDs in one batch for consecutive creates', async () => {
   const requests = [];
   const client = new GoogleDriveClient({

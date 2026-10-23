@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.15
+
+- Add a **Backup Files** view to the SoloSync sidebar for browsing current Google Drive backups by project, folder, and file.
+- Restore a selected file directly from its latest completed snapshot or open its readable current copy in Google Drive.
+- Load the complete current-file index in three parallel paginated Drive queries only when the view is opened or refreshed; no polling or broader Drive permission is added.
+- Resolve the latest completed snapshot in a fixed three Drive requests for current-format backups, regardless of history length; legacy folder snapshots remain supported in four requests.
+
 ## 0.0.14
 
 - Remove the redundant workspace-root folder from the readable Google Drive layout when a project has one backup root.

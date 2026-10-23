@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdtemp, readFile as readLocalFile, rmdir, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeStorageKey, StorageEntry, StorageFileExpectation, StorageFileStatus, StorageProvider, StorageVisibleFileExpectation } from './storageProvider';
+import { backedUpSourcePathHash, BackedUpProject, normalizeStorageKey, StorageEntry, StorageFileExpectation, StorageFileStatus, StorageProvider, StorageVisibleFileExpectation } from './storageProvider';
 
 export interface GoogleDriveItem {
   id: string;
@@ -22,6 +22,7 @@ export interface GoogleDriveApi {
   generateId(signal?: AbortSignal): Promise<string>;
   listFiles(properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;
   listFolders(properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;
+  listNewest(type: 'file' | 'folder', properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;
   listChildren(parentId: string, properties?: Record<string, string>, signal?: AbortSignal): Promise<GoogleDriveItem[]>;
   createFolder(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, signal?: AbortSignal): Promise<GoogleDriveItem>;
   uploadFile(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, source: string | Buffer, signal?: AbortSignal): Promise<GoogleDriveItem>;
@@ -64,7 +65,7 @@ function accountRootKey(account: { permissionId: string }): string {
 }
 
 function visiblePathHash(displayPath: string): string {
-  return createHash('sha256').update(normalizeStorageKey(displayPath), 'utf8').digest('hex');
+  return backedUpSourcePathHash(displayPath);
 }
 
 function archivedObjectName(item: GoogleDriveItem): string {
@@ -857,6 +858,72 @@ export class GoogleDriveProvider implements StorageProvider {
     if (!parent) throw new Error('The Google Drive backup folder was not found.');
     const items = await this.api.listChildren(parent.id, { product: 'solosync' }, signal);
     return items.map((item): StorageEntry => ({ name: item.name, type: item.mimeType === folderMimeType ? 'directory' : 'file' }));
+  }
+
+  async listBackedUpFiles(signal?: AbortSignal): Promise<BackedUpProject[]> {
+    const [projectItems, directoryItems, fileItems] = await Promise.all([
+      this.api.listChildren(this.rootId, { product: 'solosync', role: 'project', format: '1' }, signal),
+      this.api.listFolders({ product: 'solosync', role: 'current-directory', format: '1' }, signal),
+      this.api.listFiles({ product: 'solosync', role: 'current', format: '1' }, signal),
+    ]);
+    const projectByFolder = new Map<string, GoogleDriveItem>();
+    const projectById = new Map<string, GoogleDriveItem>();
+    for (const item of projectItems) {
+      const projectId = item.appProperties.projectId;
+      if (!projectId || projectById.has(projectId)) continue;
+      projectById.set(projectId, item);
+      projectByFolder.set(item.id, item);
+    }
+    const directoryById = new Map(directoryItems.map((item) => [item.id, item]));
+    const projects = new Map<string, BackedUpProject>();
+    for (const [projectId, item] of projectById) projects.set(projectId, { projectId, name: item.name, files: [] });
+    for (const item of fileItems) {
+      const projectId = item.appProperties.projectId;
+      const sourcePathHash = item.appProperties.sourcePathHash;
+      const project = projects.get(projectId);
+      if (!project || !sourcePathHash) continue;
+      const segments = [item.name];
+      let parentId = item.parents[0];
+      const visited = new Set<string>();
+      while (parentId && directoryById.has(parentId) && !visited.has(parentId)) {
+        visited.add(parentId);
+        const directory = directoryById.get(parentId)!;
+        segments.unshift(directory.name);
+        parentId = directory.parents[0];
+      }
+      if (!parentId || projectByFolder.get(parentId)?.appProperties.projectId !== projectId) continue;
+      const size = item.size === undefined ? undefined : Number(item.size);
+      project.files.push({
+        id: item.id,
+        path: segments.join('/'),
+        size: Number.isFinite(size) ? size : undefined,
+        sourcePathHash,
+        externalUri: `https://drive.google.com/open?id=${encodeURIComponent(item.id)}`,
+      });
+    }
+    for (const project of projects.values()) project.files.sort((left, right) => left.path.localeCompare(right.path));
+    return [...projects.values()].sort((left, right) => left.name.localeCompare(right.name) || left.projectId.localeCompare(right.projectId));
+  }
+
+  async readLatestCommittedManifest(projectId: string, signal?: AbortSignal): Promise<Buffer | undefined> {
+    const [legacy, records] = await Promise.all([
+      this.api.listNewest('folder', { product: 'solosync', role: 'snapshot', projectId, format: '1', lifecycle: 'committed' }, signal),
+      this.api.listNewest('file', { product: 'solosync', role: 'snapshot', projectId, format: '2', lifecycle: 'committed' }, signal),
+    ]);
+    const candidates = [...legacy, ...records]
+      .sort((left, right) => (right.appProperties.snapshotId ?? '').localeCompare(left.appProperties.snapshotId ?? ''));
+    const latest = candidates[0];
+    if (!latest) return undefined;
+    if (candidates.filter((item) => item.appProperties.snapshotId === latest.appProperties.snapshotId).length > 1) {
+      throw new Error(`Google Drive contains conflicting copies of snapshot ${latest.appProperties.snapshotId}.`);
+    }
+    if (latest.mimeType !== folderMimeType) return this.api.readFile(latest.id, signal);
+    const manifestKey = `SoloSync/${projectId}/snapshots/${latest.appProperties.snapshotId}/manifest.json`;
+    const matches = await this.api.listChildren(latest.id, { product: 'solosync', logicalKeyHash: logicalHash(manifestKey) }, signal);
+    if (matches.length > 1) throw new Error(`Google Drive contains conflicting copies of snapshot ${latest.appProperties.snapshotId}.`);
+    const manifest = canonical(matches);
+    if (!manifest || manifest.mimeType === folderMimeType) throw new Error('The latest Google Drive snapshot manifest was not found.');
+    return this.api.readFile(manifest.id, signal);
   }
 
   async createDirectory(key: string, signal?: AbortSignal): Promise<void> {

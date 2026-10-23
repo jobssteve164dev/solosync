@@ -23,6 +23,86 @@ export interface StorageVisibleFileExpectation extends StorageFileExpectation {
   source: string;
 }
 
+export interface BackedUpFile {
+  id: string;
+  path: string;
+  size?: number;
+  sourcePathHash: string;
+  externalUri: string;
+}
+
+export interface BackedUpProject {
+  projectId: string;
+  name: string;
+  files: BackedUpFile[];
+}
+
+export interface BackedUpFileTreeNode {
+  kind: 'project' | 'folder' | 'file';
+  name: string;
+  projectId: string;
+  path: string;
+  children: BackedUpFileTreeNode[];
+  file?: BackedUpFile;
+}
+
+export function backedUpSourcePathHash(sourcePath: string): string {
+  return createHash('sha256').update(normalizeStorageKey(sourcePath), 'utf8').digest('hex');
+}
+
+export function formatBackedUpFileCount(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? 'file' : 'files'}`;
+}
+
+function sortBackedUpFileNodes(nodes: BackedUpFileTreeNode[]): void {
+  nodes.sort((left, right) => {
+    const leftRank = left.kind === 'file' ? 1 : 0;
+    const rightRank = right.kind === 'file' ? 1 : 0;
+    return leftRank - rightRank || left.name.localeCompare(right.name);
+  });
+  for (const node of nodes) sortBackedUpFileNodes(node.children);
+}
+
+export function buildBackedUpFileTree(projects: BackedUpProject[]): BackedUpFileTreeNode[] {
+  const roots = projects.map((project): BackedUpFileTreeNode => {
+    const root: BackedUpFileTreeNode = {
+      kind: 'project',
+      name: project.name,
+      projectId: project.projectId,
+      path: '',
+      children: [],
+    };
+    const folders = new Map<string, BackedUpFileTreeNode>();
+    for (const file of project.files) {
+      const segments = normalizeStorageKey(file.path).split('/');
+      let children = root.children;
+      let currentPath = '';
+      for (const segment of segments.slice(0, -1)) {
+        currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+        let folder = folders.get(currentPath);
+        if (!folder) {
+          folder = { kind: 'folder', name: segment, projectId: project.projectId, path: currentPath, children: [] };
+          folders.set(currentPath, folder);
+          children.push(folder);
+        }
+        children = folder.children;
+      }
+      children.push({
+        kind: 'file',
+        name: segments.at(-1)!,
+        projectId: project.projectId,
+        path: normalizeStorageKey(file.path),
+        children: [],
+        file,
+      });
+    }
+    sortBackedUpFileNodes(root.children);
+    return root;
+  });
+  roots.sort((left, right) => left.name.localeCompare(right.name) || left.projectId.localeCompare(right.projectId));
+  return roots;
+}
+
 export type StorageFileStatus = 'missing' | 'valid' | 'invalid';
 
 export interface StorageProvider {
@@ -31,6 +111,8 @@ export interface StorageProvider {
   readonly commitResponseIsAuthoritative?: boolean;
   reconcileFiles?(files: StorageFileExpectation[], signal?: AbortSignal): Promise<Map<string, StorageFileStatus>>;
   syncVisibleFiles?(files: StorageVisibleFileExpectation[], projectId: string, snapshotId: string, signal?: AbortSignal, rootNames?: string[]): Promise<void>;
+  listBackedUpFiles?(signal?: AbortSignal): Promise<BackedUpProject[]>;
+  readLatestCommittedManifest?(projectId: string, signal?: AbortSignal): Promise<Buffer | undefined>;
   validate(signal?: AbortSignal): Promise<void>;
   testConnection(signal?: AbortSignal): Promise<void>;
   exists(key: string, signal?: AbortSignal): Promise<boolean>;

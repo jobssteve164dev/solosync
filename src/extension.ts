@@ -4,6 +4,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory, validateSourceDirectory } from './backupLocation';
 import { BackupSettingsOption, buildBackupSettingsOptions } from './backupSettings';
+import { BackedUpFileItem, BackupFilesTreeProvider } from './backupFilesTree';
 import { isBackupWorthyGitOperation, readGitState } from './git';
 import { authorizeGoogleDesktop, clearGoogleUploadSessions, GoogleTokenManager, GoogleTokenManagerCache, HostedGoogleTokenManager } from './googleAuth';
 import { googleAuthMode, GoogleAuthMode, shouldRequestGoogleSignIn } from './googleAuthMode';
@@ -13,8 +14,8 @@ import { HistoryTreeProvider, SnapshotItem } from './historyTree';
 import { projectIdFor, SnapshotCancelledError, SnapshotRepository } from './snapshotRepository';
 import { abandonPendingBackup, isCompatiblePendingDestination, readPendingBackup, withPendingBackupLock } from './pendingBackup';
 import { scanSensitiveFiles } from './sensitiveFileReview';
-import { LocalFileSystemProvider, normalizeQnapWebDavUrl, QnapWebDavConnection, QnapWebDavProvider, StorageProvider } from './storageProvider';
-import { SnapshotManifest, WorkspaceRoot } from './types';
+import { backedUpSourcePathHash, LocalFileSystemProvider, normalizeQnapWebDavUrl, QnapWebDavConnection, QnapWebDavProvider, StorageProvider } from './storageProvider';
+import { SnapshotFile, SnapshotManifest, WorkspaceRoot } from './types';
 
 const repository = new SnapshotRepository();
 const qnapConnectionKey = 'qnapWebDavConnection';
@@ -264,13 +265,21 @@ async function validateProvider(provider: StorageProvider, roots: WorkspaceRoot[
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const tree = new HistoryTreeProvider();
   const treeView = vscode.window.createTreeView('solosync.history', { treeDataProvider: tree });
+  const filesTree = new BackupFilesTreeProvider(async () => {
+    if (backupLocationKind(context) !== 'googleDrive') return [];
+    const provider = await configuredProvider(context);
+    if (!(provider instanceof GoogleDriveProvider)) return [];
+    await provider.validate();
+    return provider.listBackedUpFiles();
+  });
+  const filesTreeView = vscode.window.createTreeView('solosync.files', { treeDataProvider: filesTree });
   const output = vscode.window.createOutputChannel('SoloSync');
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   status.command = 'solosync.backupNow';
   status.text = '$(archive) SoloSync';
   status.tooltip = 'Create a workspace snapshot';
   status.show();
-  context.subscriptions.push(status, treeView, output);
+  context.subscriptions.push(status, treeView, filesTreeView, output);
 
   let running: Promise<SnapshotManifest | undefined> | undefined;
   let activeBackupController: AbortController | undefined;
@@ -282,8 +291,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const roots = protectedRoots();
     const source = sourceDirectory();
     const hasLocation = hasConfiguredBackupLocation(context);
+    const usingGoogleDrive = backupLocationKind(context) === 'googleDrive';
+    const googleDriveConnected = usingGoogleDrive && context.globalState.get<boolean>(googleDriveConnectedKey, false);
     await vscode.commands.executeCommand('setContext', 'solosync.hasSourceDirectory', Boolean(source));
     await vscode.commands.executeCommand('setContext', 'solosync.hasBackupLocation', hasLocation);
+    await vscode.commands.executeCommand('setContext', 'solosync.usingGoogleDrive', usingGoogleDrive);
+    await vscode.commands.executeCommand('setContext', 'solosync.googleDriveConnected', googleDriveConnected);
 
     let sourceAvailable = false;
     if (source) {
@@ -306,6 +319,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
       provider = undefined;
     }
+
+    filesTreeView.message = provider instanceof GoogleDriveProvider ? `Current files in ${provider.displayName}` : undefined;
+    filesTree.refresh();
 
     currentSnapshots = [];
     tree.setSnapshots(currentSnapshots);
@@ -523,6 +539,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         currentSnapshots = [manifest, ...currentSnapshots.filter((snapshot) => snapshot.snapshotId !== manifest.snapshotId)]
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
         tree.setSnapshots(currentSnapshots);
+        filesTree.refresh();
         return manifest;
       } catch (error) {
         if (error instanceof SnapshotCancelledError) {
@@ -619,6 +636,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('solosync.openSettings', () => openBackupSettings(context, refresh)),
     vscode.commands.registerCommand('solosync.showLogs', () => output.show(true)),
+    vscode.commands.registerCommand('solosync.refreshFiles', () => filesTree.refresh()),
     vscode.commands.registerCommand('solosync.connectGoogleDrive', async () => {
       if (await configureGoogleDrive(context)) await refresh();
     }),
@@ -634,6 +652,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('solosync.cancelBackup', () => activeBackupController?.abort()),
     vscode.commands.registerCommand('solosync.refresh', refresh),
     vscode.commands.registerCommand('solosync.browseBackups', () => browseBackups(context)),
+    vscode.commands.registerCommand('solosync.restoreBackedUpFile', (item?: BackedUpFileItem) => restoreBackedUpFile(item, context)),
+    vscode.commands.registerCommand('solosync.openBackedUpFile', (item?: BackedUpFileItem) => openBackedUpFile(item)),
     vscode.commands.registerCommand('solosync.restoreSnapshot', async (item?: SnapshotItem) => {
       const provider = await configuredProvider(context);
       if (provider) await restoreSnapshot(await pickSnapshot(item, tree, context, provider), provider, context);
@@ -1136,14 +1156,48 @@ async function restoreFile(manifest: SnapshotManifest | undefined, provider: Sto
   if (!manifest) return;
   const pickedFile = await vscode.window.showQuickPick(manifest.files.map((file) => ({ label: file.path, description: file.root, file })), { placeHolder: 'Choose a file to restore' });
   if (!pickedFile) return;
-  const destination = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.basename(pickedFile.file.path)), title: 'Restore file as' });
+  await restoreSelectedFile(manifest, pickedFile.file, provider);
+}
+
+async function restoreSelectedFile(manifest: SnapshotManifest, file: SnapshotFile, provider: StorageProvider): Promise<void> {
+  const destination = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.basename(file.path)), title: 'Restore file as' });
   if (!destination) return;
   try {
-    await repository.restoreFile(provider, manifest, pickedFile.file, destination.fsPath);
-    void vscode.window.showInformationMessage(`Restored ${pickedFile.file.path}`);
+    await repository.restoreFile(provider, manifest, file, destination.fsPath);
+    void vscode.window.showInformationMessage(`Restored ${file.path}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     void vscode.window.showErrorMessage(`SoloSync could not restore this file: ${message}`);
+  }
+}
+
+async function restoreBackedUpFile(item: BackedUpFileItem | undefined, context: vscode.ExtensionContext): Promise<void> {
+  const backedUpFile = item?.node.file;
+  if (!backedUpFile) return;
+  try {
+    const provider = await configuredProvider(context);
+    if (!(provider instanceof GoogleDriveProvider)) {
+      void vscode.window.showErrorMessage('Connect Google Drive to restore this backed-up file.');
+      return;
+    }
+    const latest = await repository.latest(provider, item.node.projectId);
+    const file = latest?.files.find((candidate) => backedUpSourcePathHash(`${candidate.root}/${candidate.path}`) === backedUpFile.sourcePathHash);
+    if (!latest || !file) throw new Error('The file is not part of the latest completed backup. Refresh the backup files and try again.');
+    await restoreSelectedFile(latest, file, provider);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not restore this file: ${message}`);
+  }
+}
+
+async function openBackedUpFile(item: BackedUpFileItem | undefined): Promise<void> {
+  const externalUri = item?.node.file?.externalUri;
+  if (!externalUri) return;
+  try {
+    if (!await vscode.env.openExternal(vscode.Uri.parse(externalUri))) throw new Error('Google Drive did not open the file.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not open this file in Google Drive: ${message}`);
   }
 }
 

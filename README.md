@@ -9,6 +9,7 @@ SoloSync protects the code that Git has not protected yet. It creates restorable
 - Creates an idle snapshot after workspace files stop changing.
 - Keeps Git branch, commit, message, and dirty-state context with every snapshot.
 - Shows snapshot history inside VS Code.
+- Shows current Google Drive backup files in the sidebar, grouped by project and folder.
 - Restores a whole snapshot into a new folder without overwriting the current workspace.
 - Restores one selected file to a location you choose.
 - Verifies every restored snapshot with SHA-256 hashes.
@@ -30,7 +31,7 @@ The sidebar Setup button keeps the two choices separate: **Project folder** is w
 
 Backup Settings keeps the destination, QNAP HTTPS address and secure sign-in, backup timing, and exclusions in one entry point. QNAP passwords remain hidden in VS Code secure storage rather than appearing in `settings.json`. The sidebar shows the selected project, storage type, and destination folder, and provides recovery actions if either location becomes unavailable.
 
-Future snapshots appear in the SoloSync activity bar. Git commit backups are enabled by default. Idle backups default to ten minutes and can be changed in VS Code Settings.
+Future snapshots appear in the SoloSync activity bar. When Google Drive is connected, **Backup Files** shows the current readable copy of each protected file under its project and folder. Use a file's inline actions to restore it from the latest completed snapshot or open it in Google Drive. The view loads on demand and refreshes after a completed backup; it does not poll Drive in the background. Restoring from this view reads only the latest manifest, so the request count does not grow with snapshot history. Git commit backups are enabled by default. Idle backups default to ten minutes and can be changed in VS Code Settings.
 
 ## Restoring safely
 

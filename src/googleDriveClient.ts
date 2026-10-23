@@ -201,6 +201,23 @@ export class GoogleDriveClient implements GoogleDriveApi {
     return files;
   }
 
+  async listNewest(type: 'file' | 'folder', properties: Record<string, string> = {}, signal?: AbortSignal): Promise<GoogleDriveItem[]> {
+    const query = [type === 'folder' ? `mimeType = '${folderMimeType}'` : `mimeType != '${folderMimeType}'`, 'trashed = false'];
+    for (const [key, value] of Object.entries(properties)) {
+      query.push(`appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' }`);
+    }
+    const parameters = new URLSearchParams({
+      q: query.join(' and '),
+      spaces: 'drive',
+      fields: `files(${itemFields})`,
+      orderBy: 'name desc',
+      pageSize: '2',
+    });
+    const response = await this.request(`${driveApi}/files?${parameters}`, { signal });
+    const body = await response.json() as { files?: GoogleDriveItem[] };
+    return body.files ?? [];
+  }
+
   async createFolder(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, signal?: AbortSignal): Promise<GoogleDriveItem> {
     const response = await this.request(`${driveApi}/files?fields=${encodeURIComponent(itemFields)}`, {
       method: 'POST',

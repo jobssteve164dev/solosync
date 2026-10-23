@@ -45,6 +45,7 @@ test('rejects missing locations and files', async () => {
 
 test('sidebar exposes setup, settings, and recovery entry points', () => {
   const manifest = require('../package.json');
+  const views = manifest.contributes.views.solosync;
   const titleCommands = manifest.contributes.menus['view/title'].map((item) => item.command);
   assert.ok(titleCommands.includes('solosync.setup'));
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.configureSource'));
@@ -65,4 +66,13 @@ test('sidebar exposes setup, settings, and recovery entry points', () => {
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.hasBackupLocation')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.when.includes('!solosync.backupLocationAvailable')));
   assert.ok(manifest.contributes.viewsWelcome.some((item) => item.contents.includes('command:solosync.browseBackups')));
+  assert.ok(views.some((item) => item.id === 'solosync.files' && item.name === 'Backup Files'));
+  assert.ok(manifest.activationEvents.includes('onView:solosync.files'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.refreshFiles'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.restoreBackedUpFile'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.openBackedUpFile'));
+  assert.ok(manifest.contributes.menus['view/title'].some((item) => item.command === 'solosync.refreshFiles' && item.when === 'view == solosync.files'));
+  assert.ok(manifest.contributes.menus['view/item/context'].some((item) => item.command === 'solosync.restoreBackedUpFile' && item.when.includes('solosync.backedUpFile')));
+  assert.ok(manifest.contributes.menus['view/item/context'].some((item) => item.command === 'solosync.openBackedUpFile' && item.when.includes('solosync.backedUpFile')));
+  assert.ok(manifest.contributes.viewsWelcome.some((item) => item.view === 'solosync.files' && item.contents.includes('command:solosync.connectGoogleDrive')));
 });
