@@ -1,10 +1,94 @@
 const assert = require('node:assert/strict');
-const { mkdtemp, mkdir, readFile, readdir, stat, writeFile } = require('node:fs/promises');
+const { mkdtemp, mkdir, readFile, readdir, rmdir, stat, unlink, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { projectIdFor, SnapshotCancelledError, SnapshotRepository } = require('../out/snapshotRepository.js');
 const { LocalFileSystemProvider } = require('../out/storageProvider.js');
+
+async function removeTreePrecisely(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) await removeTreePrecisely(target);
+    else await unlink(target);
+  }
+  await rmdir(directory);
+}
+
+test('reuses one stable content object across unchanged snapshots', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-incremental-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(temp, 'backup');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'tiny.txt'), 'same content');
+  const repository = new SnapshotRepository();
+  const provider = new LocalFileSystemProvider(backup);
+  const options = {
+    provider, projectId: 'incremental-project', projectName: 'Incremental Project',
+    roots: [{ name: 'workspace', path: workspace }], excludes: [], reason: 'Test', git: { dirty: true },
+  };
+
+  const first = await repository.create(options);
+  const second = await repository.create(options);
+
+  assert.equal(first.formatVersion, 2);
+  assert.equal(second.formatVersion, 2);
+  assert.deepEqual(await readdir(path.join(backup, 'SoloSync', 'incremental-project', 'objects')), [first.files[0].sha256]);
+  assert.deepEqual(await readdir(path.join(backup, 'SoloSync', 'incremental-project', 'snapshots', first.snapshotId)), ['manifest.json']);
+  assert.deepEqual(await readdir(path.join(backup, 'SoloSync', 'incremental-project', 'snapshots', second.snapshotId)), ['manifest.json']);
+});
+
+test('adds one content object when a file changes and restores either version', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-incremental-change-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(temp, 'backup');
+  const restoredFirst = path.join(temp, 'restored-first');
+  const restoredSecond = path.join(temp, 'restored-second');
+  await mkdir(workspace);
+  const source = path.join(workspace, 'tiny.txt');
+  await writeFile(source, 'first');
+  const repository = new SnapshotRepository();
+  const provider = new LocalFileSystemProvider(backup);
+  const options = {
+    provider, projectId: 'incremental-change', projectName: 'Incremental Change',
+    roots: [{ name: 'workspace', path: workspace }], excludes: [], reason: 'Test', git: { dirty: true },
+  };
+
+  const first = await repository.create(options);
+  await writeFile(source, 'second');
+  const second = await repository.create(options);
+  await repository.restoreAll(provider, first, restoredFirst);
+  await repository.restoreAll(provider, second, restoredSecond);
+
+  assert.equal((await readdir(path.join(backup, 'SoloSync', 'incremental-change', 'objects'))).length, 2);
+  assert.equal(await readFile(path.join(restoredFirst, 'workspace', 'tiny.txt'), 'utf8'), 'first');
+  assert.equal(await readFile(path.join(restoredSecond, 'workspace', 'tiny.txt'), 'utf8'), 'second');
+});
+
+test('repairs an existing corrupt content object before publishing another snapshot', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-incremental-repair-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'workspace');
+  const backup = path.join(temp, 'backup');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'tiny.txt'), 'original');
+  const repository = new SnapshotRepository();
+  const provider = new LocalFileSystemProvider(backup);
+  const options = {
+    provider, projectId: 'incremental-repair', projectName: 'Incremental Repair',
+    roots: [{ name: 'workspace', path: workspace }], excludes: [], reason: 'Test', git: { dirty: true },
+  };
+  const first = await repository.create(options);
+  const objectKey = `SoloSync/incremental-repair/objects/${first.files[0].sha256}`;
+  await provider.writeFile(objectKey, Buffer.from('corrupt'));
+
+  const second = await repository.create(options);
+
+  assert.deepEqual(await repository.verify(provider, first), { valid: true, checked: 1, errors: [] });
+  assert.deepEqual(await repository.verify(provider, second), { valid: true, checked: 1, errors: [] });
+});
 
 test('creates, lists, verifies, and restores a workspace snapshot', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-test-'));
@@ -40,8 +124,11 @@ test('creates, lists, verifies, and restores a workspace snapshot', async () => 
   await provider.delete(`SoloSync/${projectId}/project.json`);
   assert.deepEqual((await repository.listProjects(provider)).map((project) => project.projectName), ['Sample']);
   assert.ok(progress.some((event) => event.phase === 'scanning'));
+  assert.deepEqual(progress.find((event) => event.phase === 'scanning'), { phase: 'scanning', discovered: 0 });
+  assert.ok(progress.some((event) => event.phase === 'copying' && event.completed === 0));
   assert.ok(progress.some((event) => event.phase === 'copying' && event.completed === event.total));
   assert.ok(progress.some((event) => event.phase === 'finalizing'));
+  assert.deepEqual([...new Set(progress.map((event) => event.phase))], ['scanning', 'copying', 'finalizing', 'uploading', 'verifying', 'publishing', 'complete']);
 
   await repository.restoreAll(provider, manifest, restored);
   assert.equal(await readFile(path.join(restored, 'sample', 'src', 'index.js'), 'utf8'), 'export const answer = 42;\n');
@@ -73,7 +160,7 @@ test('a corrupt single-file restore does not overwrite the selected destination'
     git: { dirty: true },
   });
   const file = manifest.files[0];
-  await provider.writeFile(`SoloSync/${manifest.projectId}/snapshots/${manifest.snapshotId}/files/${file.root}/${file.path}`, Buffer.from('corrupt'));
+  await provider.writeFile(`SoloSync/${manifest.projectId}/objects/${file.sha256}`, Buffer.from('corrupt'));
 
   await assert.rejects(repository.restoreFile(provider, manifest, file, destination), /failed verification/);
   assert.equal(await readFile(destination, 'utf8'), 'keep me');
@@ -150,7 +237,8 @@ test('creates nested restore folders before asking the provider to download', as
     files: [{ root: 'root', path: 'nested/file.txt', size: content.length, modifiedAt: Date.now(), sha256: require('node:crypto').createHash('sha256').update(content).digest('hex') }],
   };
   const provider = {
-    downloadFile: async (_key, target) => {
+    downloadFile: async (key, target) => {
+      assert.equal(key, 'SoloSync/project/snapshots/snapshot/files/root/nested/file.txt');
       assert.equal((await stat(path.dirname(target))).isDirectory(), true);
       await writeFile(target, content);
     },
@@ -274,7 +362,7 @@ test('resumes the same frozen snapshot after a transient upload failure', async 
   class FlakyProvider extends LocalFileSystemProvider {
     failed = false;
     async writeFile(key, source, signal) {
-      if (!this.failed && key.endsWith('/files/project/source.txt')) {
+      if (!this.failed && key.includes('/objects/')) {
         this.failed = true;
         throw new Error('temporary network failure');
       }
@@ -303,7 +391,7 @@ test('resumes the same frozen snapshot after a transient upload failure', async 
   const completed = await repository.create({ ...options, pendingDestinationIdentity: `google-drive-root-id:${'a'.repeat(64)}:root-b` });
 
   assert.equal(completed.snapshotId, pendingManifest.snapshotId);
-  assert.equal((await provider.readFile(`SoloSync/resume-project/snapshots/${completed.snapshotId}/files/project/source.txt`)).toString(), 'frozen');
+  assert.equal((await provider.readFile(`SoloSync/resume-project/objects/${completed.files[0].sha256}`)).toString(), 'frozen');
   assert.equal(await provider.exists(`SoloSync/resume-project/snapshots/${completed.snapshotId}/job.json`), false);
   await assert.rejects(readFile(path.join(pending, 'manifest.json')), /ENOENT/);
 });
@@ -338,6 +426,74 @@ test('recognizes a committed snapshot when the publish response was lost', async
 
   assert.equal((await repository.list(provider, 'publish-project')).some((item) => item.snapshotId === resumed.snapshotId), true);
   await assert.rejects(readFile(path.join(pending, 'manifest.json')), /ENOENT/);
+});
+
+test('rejects a different committed manifest when reconciling a lost publish response', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-publish-mismatch-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'project');
+  const backup = path.join(temp, 'backup');
+  const pending = path.join(temp, 'pending');
+  await mkdir(workspace);
+  await mkdir(backup);
+  await writeFile(path.join(workspace, 'source.txt'), 'content');
+  class LostResponseProvider extends LocalFileSystemProvider {
+    lost = false;
+    async move(source, destination, signal) {
+      await super.move(source, destination, signal);
+      if (!this.lost) {
+        this.lost = true;
+        throw new Error('publish response lost');
+      }
+    }
+  }
+  const provider = new LostResponseProvider(backup);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider, projectId: 'publish-mismatch', projectName: 'Publish Mismatch',
+    roots: [{ name: 'project', path: workspace }], excludes: [], reason: 'Manual', git: { dirty: true }, pendingDirectory: pending,
+  };
+  await assert.rejects(repository.create(options), /publish response lost/);
+  const frozen = JSON.parse(await readFile(path.join(pending, 'manifest.json'), 'utf8'));
+  const committedPath = path.join(backup, 'SoloSync', 'publish-mismatch', 'snapshots', frozen.snapshotId, 'manifest.json');
+  const different = { ...frozen, files: frozen.files.map((file) => ({ ...file, path: `different-${file.path}` })) };
+  await writeFile(committedPath, `${JSON.stringify(different, null, 2)}\n`);
+
+  await assert.rejects(repository.create(options), /does not match the pending backup/);
+  assert.equal(await readFile(path.join(pending, 'manifest.json'), 'utf8').then(Boolean), true);
+});
+
+test('rejects damaged content when reconciling an otherwise matching committed snapshot', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-publish-corrupt-'));
+  t.after(() => removeTreePrecisely(temp));
+  const workspace = path.join(temp, 'project');
+  const backup = path.join(temp, 'backup');
+  const pending = path.join(temp, 'pending');
+  await mkdir(workspace);
+  await mkdir(backup);
+  await writeFile(path.join(workspace, 'source.txt'), 'content');
+  class LostResponseProvider extends LocalFileSystemProvider {
+    lost = false;
+    async move(source, destination, signal) {
+      await super.move(source, destination, signal);
+      if (!this.lost) {
+        this.lost = true;
+        throw new Error('publish response lost');
+      }
+    }
+  }
+  const provider = new LostResponseProvider(backup);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider, projectId: 'publish-corrupt', projectName: 'Publish Corrupt',
+    roots: [{ name: 'project', path: workspace }], excludes: [], reason: 'Manual', git: { dirty: true }, pendingDirectory: pending,
+  };
+  await assert.rejects(repository.create(options), /publish response lost/);
+  const frozen = JSON.parse(await readFile(path.join(pending, 'manifest.json'), 'utf8'));
+  await provider.writeFile(`SoloSync/publish-corrupt/objects/${frozen.files[0].sha256}`, Buffer.from('corrupt'));
+
+  await assert.rejects(repository.create(options), /failed verification/);
+  assert.equal(await readFile(path.join(pending, 'manifest.json'), 'utf8').then(Boolean), true);
 });
 
 test('preserves a pending backup when cancellation arrives after publication', async () => {

@@ -1,34 +1,40 @@
 const assert = require('node:assert/strict');
-const { mkdtemp, readFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, rmdir, unlink, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const test = require('node:test');
 const { GoogleDriveProvider } = require('../out/googleDriveProvider.js');
+const { SnapshotRepository } = require('../out/snapshotRepository.js');
 
 class MemoryDriveApi {
   constructor() {
     this.sequence = 0;
     this.items = new Map();
+    this.calls = [];
   }
 
   async about() {
+    this.calls.push('about');
     return { user: { permissionId: 'permission-user-a', displayName: 'Solo User', emailAddress: 'solo@example.com' }, storageQuota: { limit: '1000000', usage: '100' } };
   }
 
-  async generateId() { return `id-${++this.sequence}`; }
+  async generateId() { this.calls.push('generateId'); return `id-${++this.sequence}`; }
 
   async listChildren(parentId, properties = {}) {
+    this.calls.push('listChildren');
     return [...this.items.values()].filter((item) => !item.trashed && item.parents.includes(parentId)
       && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value));
   }
 
   async listFolders(properties = {}) {
+    this.calls.push('listFolders');
     return [...this.items.values()].filter((item) => !item.trashed && item.mimeType === 'application/vnd.google-apps.folder'
       && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value));
   }
 
   async createFolder(item) {
+    this.calls.push('createFolder');
     if (this.items.has(item.id)) throw new Error('already exists');
     const created = { ...item, mimeType: 'application/vnd.google-apps.folder', size: undefined, content: undefined, createdTime: new Date(this.sequence * 1000).toISOString(), trashed: false };
     this.items.set(item.id, created);
@@ -36,15 +42,17 @@ class MemoryDriveApi {
   }
 
   async uploadFile(item, source) {
+    this.calls.push('uploadFile');
     const content = Buffer.isBuffer(source) ? source : await readFile(source);
     const created = { ...item, mimeType: 'application/octet-stream', size: String(content.length), content, createdTime: new Date(this.sequence * 1000).toISOString(), trashed: false };
     this.items.set(item.id, created);
     return created;
   }
 
-  async get(id) { return this.items.get(id); }
+  async get(id) { this.calls.push('get'); return this.items.get(id); }
 
   async update(id, patch) {
+    this.calls.push('update');
     const item = this.items.get(id);
     if (!item) throw new Error('not found');
     Object.assign(item, patch);
@@ -52,20 +60,90 @@ class MemoryDriveApi {
     return item;
   }
 
-  async readFile(id) { return Buffer.from(this.items.get(id).content); }
+  async readFile(id) { this.calls.push('readFile'); return Buffer.from(this.items.get(id).content); }
 
-  async hashFile(id) { return createHash('sha256').update(this.items.get(id).content).digest('hex'); }
+  async hashFile(id) { this.calls.push('hashFile'); return createHash('sha256').update(this.items.get(id).content).digest('hex'); }
 
-  async forgetUpload() {}
+  async forgetUpload() { this.calls.push('forgetUpload'); }
 
   async downloadFile(id, destination) {
+    this.calls.push('downloadFile');
     const { mkdir, writeFile } = require('node:fs/promises');
     await mkdir(path.dirname(destination), { recursive: true });
     await writeFile(destination, this.items.get(id).content);
   }
 
-  async trash(id) { this.items.get(id).trashed = true; }
+  async trash(id) { this.calls.push('trash'); this.items.get(id).trashed = true; }
 }
+
+test('completes empty and small snapshots within a 30-second one-second-RTT budget', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-budget-'));
+  const workspace = path.join(temp, 'workspace');
+  const pending = path.join(temp, 'pending');
+  const source = path.join(workspace, 'tiny.txt');
+  await mkdir(workspace);
+  t.after(async () => {
+    await unlink(source).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+    await rmdir(workspace);
+    await rmdir(temp);
+  });
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  await provider.validate();
+  const repository = new SnapshotRepository();
+  assert.equal(await repository.projectExists(provider, 'latency-budget'), false);
+
+  const empty = await repository.create({
+    provider,
+    projectId: 'latency-budget',
+    projectName: 'Latency Budget',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Performance test',
+    git: { dirty: true },
+  });
+
+  assert.equal(empty.files.length, 0);
+  const emptyRemoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
+  assert.ok(emptyRemoteCalls * 1_000 < 30_000, `expected empty snapshot below 30 seconds at one-second Drive RTT, received ${emptyRemoteCalls} requests: ${JSON.stringify(api.calls)}`);
+
+  await writeFile(source, 'x');
+  api.calls = [];
+  const manifest = await repository.create({
+    provider,
+    projectId: 'latency-budget',
+    projectName: 'Latency Budget',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Small performance test',
+    git: { dirty: true },
+  });
+  assert.equal(manifest.files.length, 1);
+  const remoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
+  assert.ok(remoteCalls * 1_000 < 30_000, `expected less than 30 seconds at one-second Drive RTT, received ${remoteCalls} requests: ${JSON.stringify(api.calls)}`);
+
+  api.calls = [];
+  const repeated = await repository.create({
+    provider,
+    projectId: 'latency-budget',
+    projectName: 'Latency Budget',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Repeated performance test',
+    git: { dirty: true },
+  });
+  assert.equal(repeated.files[0].sha256, manifest.files[0].sha256);
+  assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 1, 'an unchanged snapshot should upload only its manifest');
+});
 
 test('projects filesystem keys onto Drive without physical staging or snapshots folders', async () => {
   const api = new MemoryDriveApi();
@@ -80,6 +158,7 @@ test('projects filesystem keys onto Drive without physical staging or snapshots 
 
   assert.deepEqual(await provider.list(`SoloSync/${project}/staging`), [{ name: snapshot, type: 'directory' }]);
   assert.deepEqual([...api.items.values()].filter((item) => ['staging', 'snapshots'].includes(item.name)), []);
+  assert.deepEqual([...api.items.values()].filter((item) => item.mimeType !== 'application/vnd.google-apps.folder' && item.parents.includes('root')), []);
   await provider.move(`SoloSync/${project}/staging/${snapshot}`, `SoloSync/${project}/snapshots/${snapshot}`);
   assert.deepEqual(await provider.list(`SoloSync/${project}/staging`), []);
   assert.deepEqual(await provider.list(`SoloSync/${project}/snapshots`), [{ name: snapshot, type: 'directory' }]);
@@ -138,6 +217,100 @@ test('reuses the reserved Drive file ID after an interrupted upload', async () =
   assert.equal(attemptedIds.length, 2);
   assert.equal(attemptedIds[0], attemptedIds[1]);
   assert.equal([...ids.keys()].filter((key) => key.startsWith('google-drive-root-id:')).length, 1);
+});
+
+test('reuses an already uploaded logical file after reconnecting', async () => {
+  const api = new MemoryDriveApi();
+  const key = 'SoloSync/project/staging/snapshot/manifest.json';
+  const first = await GoogleDriveProvider.connect(api);
+  await first.writeFile(key, Buffer.from('{"same":true}'));
+
+  const second = await GoogleDriveProvider.connect(api);
+  await second.writeFile(key, Buffer.from('{"same":true}'));
+
+  const logicalFiles = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.logicalKeyHash === createHash('sha256').update('SoloSync/project/snapshot/snapshot/manifest.json').digest('hex'));
+  assert.equal(logicalFiles.length, 1);
+});
+
+test('reconciles a committed snapshot when the move response is lost in the cached provider', async () => {
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const staging = 'SoloSync/project/staging/snapshot';
+  const committed = 'SoloSync/project/snapshots/snapshot';
+  await provider.createDirectory(staging);
+  await provider.writeFile(`${staging}/manifest.json`, Buffer.from('{}'));
+  const originalUpdate = api.update.bind(api);
+  let loseMoveResponse = true;
+  api.update = async (id, patch) => {
+    const updated = await originalUpdate(id, patch);
+    if (loseMoveResponse && patch.appProperties?.lifecycle === 'committed') {
+      loseMoveResponse = false;
+      throw new Error('move response lost');
+    }
+    return updated;
+  };
+
+  await provider.move(staging, committed);
+
+  assert.equal(await provider.exists(committed), true);
+  assert.equal(await provider.exists(staging), false);
+  assert.equal((await provider.readFile(`${committed}/manifest.json`)).toString(), '{}');
+});
+
+test('concurrent first access converges on one project folder under one root', async () => {
+  const api = new MemoryDriveApi();
+  const first = await GoogleDriveProvider.connect(api);
+  const second = await GoogleDriveProvider.connect(api);
+  const originalListChildren = api.listChildren.bind(api);
+  let projectLists = 0;
+  let releaseLists;
+  const bothListed = new Promise((resolve) => { releaseLists = resolve; });
+  api.listChildren = async (parentId, properties = {}) => {
+    if (properties.role === 'project' && properties.projectId === 'shared' && projectLists < 2) {
+      projectLists += 1;
+      const result = await originalListChildren(parentId, properties);
+      if (projectLists === 2) releaseLists();
+      await bothListed;
+      return result;
+    }
+    return originalListChildren(parentId, properties);
+  };
+
+  await Promise.all([
+    first.createDirectory('SoloSync/shared/staging/snapshot-a'),
+    second.createDirectory('SoloSync/shared/staging/snapshot-b'),
+  ]);
+
+  const projects = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'shared');
+  assert.equal(projects.length, 1);
+  const snapshots = await first.list('SoloSync/shared/staging');
+  assert.deepEqual(snapshots.map((item) => item.name), ['snapshot-a', 'snapshot-b']);
+});
+
+test('concurrent first connections converge on one backup root', async () => {
+  const api = new MemoryDriveApi();
+  const originalListFolders = api.listFolders.bind(api);
+  let rootLists = 0;
+  let releaseLists;
+  const bothListed = new Promise((resolve) => { releaseLists = resolve; });
+  api.listFolders = async (properties = {}) => {
+    if (properties.role === 'root' && rootLists < 2) {
+      rootLists += 1;
+      const result = await originalListFolders(properties);
+      if (rootLists === 2) releaseLists();
+      await bothListed;
+      return result;
+    }
+    return originalListFolders(properties);
+  };
+
+  const [first, second] = await Promise.all([
+    GoogleDriveProvider.connect(api),
+    GoogleDriveProvider.connect(api),
+  ]);
+
+  assert.equal(first.rootId, second.rootId);
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'root').length, 1);
 });
 
 test('reconnects to the same visible backup root after the user moves it', async () => {
@@ -275,6 +448,9 @@ test('moves only known snapshots when a duplicate root contains the only project
   const rootB = await api.createFolder({ id: 'root-b', name: 'SoloSync Backups', parents: ['root'], appProperties: { product: 'solosync', role: 'root', format: '1' } });
   const projectB = await api.createFolder({ id: 'project-b', name: 'Project', parents: [rootB.id], appProperties: { product: 'solosync', role: 'project', format: '1', projectId: 'shared' } });
   const snapshot = await api.createFolder({ id: 'snapshot-b', name: 'snapshot-b', parents: [projectB.id], appProperties: { product: 'solosync', role: 'snapshot', format: '1', projectId: 'shared', snapshotId: 'snapshot-b', lifecycle: 'committed' } });
+  const objectContent = Buffer.from('shared content');
+  const objectHash = createHash('sha256').update(objectContent).digest('hex');
+  const object = await api.uploadFile({ id: 'object-b', name: objectHash, parents: [projectB.id], appProperties: { product: 'solosync', role: 'object', format: '1', projectId: 'shared', logicalKeyHash: 'object-key' } }, objectContent);
 
   const provider = await GoogleDriveProvider.connect(api);
   const canonicalProject = [...api.items.values()].find((item) => item.parents.includes(rootA.id) && item.appProperties.role === 'project');
@@ -283,5 +459,6 @@ test('moves only known snapshots when a duplicate root contains the only project
   assert.deepEqual(projectB.parents, [rootB.id]);
   assert.equal(projectB.appProperties.role, 'merged-project');
   assert.deepEqual(snapshot.parents, [canonicalProject.id]);
+  assert.deepEqual(object.parents, [canonicalProject.id]);
   assert.deepEqual((await provider.list('SoloSync/shared/snapshots')).map((item) => item.name), ['snapshot-b']);
 });

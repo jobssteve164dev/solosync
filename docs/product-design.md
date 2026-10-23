@@ -72,16 +72,17 @@ Git 负责代码历史、分支和协作；本插件负责未提交文件、私�
 
 ## 备份数据格式
 
-每次备份创建一个不可变快照：
+每次备份创建一个不可变的逻辑完整快照，物理文件内容按 SHA-256 复用：
 
 ```text
-CodeBackups/
+SoloSync/
   <project-id>/
     project.json
+    objects/
+      <sha256>
     snapshots/
-      2026-07-20T120102Z_<snapshot-id>/
+      <snapshot-id>/
         manifest.json
-        payload.tar.zst
 ```
 
 `project.json` 保存稳定项目 ID、显示名、格式版本和创建时间。`manifest.json` 至少包含：
@@ -89,10 +90,9 @@ CodeBackups/
 - 快照 ID、创建时间、插件版本、设备显示名。
 - 工作区根目录的逻辑名称；不得保存本机绝对路径。
 - 每个文件的相对路径、大小、修改时间、SHA-256。
-- 排除规则摘要、压缩与加密参数。
-- 整体 payload 的大小与 SHA-256。
+- Git 状态和触发来源等恢复上下文。
 
-首版用完整快照最可靠，也最容易验证和恢复。第二阶段再加入内容寻址分块：按文件哈希复用未变化 blob，用 manifest 组合快照；在完成引用计数与崩溃恢复前，不能上线自动垃圾回收。
+manifest 按文件哈希引用 `objects/` 中的稳定内容对象。每个快照都能独立恢复完整目录，但未变化内容不会再次上传。旧版把文件放在 snapshot 目录内的 format-1 快照继续可读、可校验和可恢复；在完成引用计数与崩溃恢复前，不上线自动垃圾回收。
 
 ### 默认排除
 
@@ -145,7 +145,7 @@ interface StorageProvider {
 - 本地桌面使用系统浏览器、Desktop OAuth、PKCE 与 loopback 回调。Remote SSH、Dev Container、Coder、code-server 与 Web Extension 宿主使用固定 HTTPS Web OAuth 回调，并让用户把绑定 PKCE 的短时 SoloSync 回调码粘贴回连接提示；不使用 Google 已停止支持的 OOB 流程、自定义 URI scheme或 Device Authorization Flow。
 - 权限使用 `https://www.googleapis.com/auth/drive.file`，只访问插件创建或由用户明确交给插件的文件；不要申请完整 `drive` 权限。
 - 首次连接时自动创建 `SoloSync Backups` 文件夹并保存 folder ID，不再要求用户选择本地同步目录；后续按父级 ID 查询，避免依赖同名路径。
-- 大于 5 MB 或网络可能中断时使用 resumable upload；Google 官方建议可续传上传也适用于小文件，上传分块除最后一块外应为 256 KiB 的倍数。
+- 5 MB 以内且可整体重传的文件使用单请求 multipart upload；更大文件使用 resumable upload，并采用 8 MiB 分块以减少往返（分块仍为 Google 要求的 256 KiB 倍数）。
 - 将 resumable session URI 作为敏感凭据保存到 SecretStorage；snapshot ID、冻结后的本地副本、预留 Drive file ID 与任务状态持久保存。重启后查询服务端 `Range` 再继续，不能只相信本地偏移。
 - 利用预生成的 Drive file ID 与 `appProperties` 保存 project ID、snapshot ID、format version、logical key hash 和发布状态；Drive 允许重名，不能按名称任取一个对象。Google backend 不创建共享可变的 `project.json`，项目状态从 committed snapshots 派生。
 - 完整连接、存储、失败恢复与验收设计见 [`google-drive-native-design.md`](google-drive-native-design.md)。
@@ -177,7 +177,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 ### 第一阶段：可用首版
 
 - VS Code 桌面扩展骨架、用户选择的单项目目录扫描、排除规则。
-- 完整快照、manifest、SHA-256、恢复到新目录。
+- 逻辑完整、物理增量的内容寻址快照、manifest、SHA-256、恢复到新目录。
 - Google Drive `drive.file` + resumable upload。
 - QNAP HTTPS WebDAV + SecretStorage 凭据。
 - 手动备份、空闲自动备份、历史列表、连接测试、取消与重试。
@@ -188,7 +188,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 
 - 选择性恢复、覆盖前差异预览与安全快照。
 - 本地挂载目录后端、QNAP 性能与兼容性增强。
-- 内容寻址增量、保留策略、完整性定期巡检。
+- 保留策略、内容对象安全回收、完整性定期巡检。
 - 客户端加密与离线恢复工具。
 
 ### 第三阶段：高级能力
@@ -211,7 +211,7 @@ SMB 不建议首版在插件中原生实现。若用户已经把 QNAP 共享目�
 3. 首版自带两个原生 provider，不强依赖 rclone。
 4. Google 只申请 `drive.file`；QNAP 默认 HTTPS WebDAV + 最小权限账户。
 5. 恢复到新目录是默认路径；覆盖当前工作区必须有差异预览和安全快照。
-6. 首版先做完整不可变快照；增量去重在引用与回收机制验证后再上线。
+6. 每个快照保持完整不可变的恢复语义；底层按文件哈希增量复用，自动垃圾回收要等引用与崩溃恢复机制验证后再上线。
 
 ## 主要证据来源
 

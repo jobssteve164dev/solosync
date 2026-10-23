@@ -319,7 +319,7 @@ test('remote verification failure never publishes a corrupt WebDAV snapshot', as
     await writeFile(path.join(workspace, 'source.txt'), 'original');
     const provider = await createProvider(server);
     const originalHashFile = provider.hashFile.bind(provider);
-    provider.hashFile = async (key, signal) => key.endsWith('/files/project/source.txt')
+    provider.hashFile = async (key, signal) => key.includes('/objects/')
       ? createHash('sha256').update('corrupt').digest('hex')
       : originalHashFile(key, signal);
     const repository = new SnapshotRepository();
@@ -335,6 +335,8 @@ test('remote verification failure never publishes a corrupt WebDAV snapshot', as
 
     assert.deepEqual(await repository.list(provider, 'corrupt-project'), []);
     assert.deepEqual(await provider.list('SoloSync/corrupt-project/staging'), []);
+    const expectedHash = createHash('sha256').update('original').digest('hex');
+    assert.equal(await provider.exists(`SoloSync/corrupt-project/objects/${expectedHash}`), false);
   } finally {
     await server.close();
     await rm(workspaceParent, { recursive: true, force: true });

@@ -15,7 +15,7 @@ export interface GitState {
 }
 
 export interface SnapshotManifest {
-  formatVersion: 1;
+  formatVersion: 1 | 2;
   snapshotId: string;
   projectId: string;
   projectName: string;

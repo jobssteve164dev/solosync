@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { readFile as readLocalFile } from 'node:fs/promises';
 import { normalizeStorageKey, StorageEntry, StorageProvider } from './storageProvider';
 
@@ -82,6 +83,45 @@ async function archiveMergedFolder(api: GoogleDriveApi, duplicate: GoogleDriveIt
   }, signal);
 }
 
+async function sourceHash(source: string | Buffer): Promise<string> {
+  const hash = createHash('sha256');
+  if (Buffer.isBuffer(source)) return hash.update(source).digest('hex');
+  for await (const chunk of createReadStream(source)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
+async function reconcileProjectCopies(api: GoogleDriveApi, projectId: string, projects: GoogleDriveItem[], signal?: AbortSignal, preferredPrimary?: GoogleDriveItem): Promise<GoogleDriveItem | undefined> {
+  const primary = preferredPrimary ?? canonical(projects);
+  if (!primary) return undefined;
+  const knownSnapshots = await api.listChildren(primary.id, { product: 'solosync', role: 'snapshot', projectId, format: '1' }, signal);
+  const knownObjects = await api.listChildren(primary.id, { product: 'solosync', role: 'object', projectId, format: '1' }, signal);
+  for (const duplicate of projects.filter((item) => item.id !== primary.id)) {
+    const snapshots = await api.listChildren(duplicate.id, { product: 'solosync', role: 'snapshot', projectId, format: '1' }, signal);
+    for (const snapshot of snapshots) {
+      if (knownSnapshots.some((item) => item.appProperties.snapshotId === snapshot.appProperties.snapshotId && item.id !== snapshot.id)) {
+        throw new Error(`Google Drive contains conflicting copies of snapshot ${snapshot.appProperties.snapshotId}.`);
+      }
+      await api.update(snapshot.id, { addParent: primary.id, removeParent: duplicate.id }, signal);
+      knownSnapshots.push(snapshot);
+    }
+    const objects = await api.listChildren(duplicate.id, { product: 'solosync', role: 'object', projectId, format: '1' }, signal);
+    for (const object of objects) {
+      const existing = knownObjects.find((item) => item.appProperties.logicalKeyHash === object.appProperties.logicalKeyHash);
+      if (existing) {
+        const [existingHash, duplicateHash] = await Promise.all([api.hashFile(existing.id, signal), api.hashFile(object.id, signal)]);
+        if (existingHash !== duplicateHash || existingHash !== existing.name || duplicateHash !== object.name) {
+          throw new Error(`Google Drive contains conflicting copies of content object ${object.name}.`);
+        }
+      } else {
+        await api.update(object.id, { addParent: primary.id, removeParent: duplicate.id }, signal);
+        knownObjects.push(object);
+      }
+    }
+    await archiveMergedFolder(api, duplicate, 'merged-project', signal);
+  }
+  return primary;
+}
+
 function parseKey(key: string): string[] {
   const normalized = normalizeStorageKey(key);
   const segments = normalized ? normalized.split('/') : [];
@@ -92,15 +132,20 @@ function parseKey(key: string): string[] {
 export class GoogleDriveProvider implements StorageProvider {
   readonly displayName: string;
   readonly destinationIdentity: string;
+  readonly rootId: string;
+  readonly commitResponseIsAuthoritative = true;
+  private readonly resolved = new Map<string, GoogleDriveItem | null>();
 
   private constructor(
     private readonly api: GoogleDriveApi,
-    readonly rootId: string,
+    root: GoogleDriveItem,
     readonly account: { permissionId: string; displayName?: string; emailAddress?: string },
     private readonly stableIds?: GoogleDriveStableIds,
   ) {
+    this.rootId = root.id;
     this.displayName = account.emailAddress || account.displayName || 'Google Drive';
-    this.destinationIdentity = `${accountRootKey(account)}:${rootId}`;
+    this.destinationIdentity = `${accountRootKey(account)}:${root.id}`;
+    this.resolved.set('SoloSync', root);
   }
 
   static async connect(api: GoogleDriveApi, stableIds?: GoogleDriveStableIds, signal?: AbortSignal): Promise<GoogleDriveProvider> {
@@ -111,7 +156,9 @@ export class GoogleDriveProvider implements StorageProvider {
     const rootStableKey = accountRootKey(account);
     let roots = await api.listFolders({ product: 'solosync', role: 'root', format: '1' }, signal);
     const savedRootId = await stableIds?.get(rootStableKey);
-    const savedRoot = savedRootId ? await api.get(savedRootId, signal) : undefined;
+    const savedRoot = savedRootId
+      ? roots.find((candidate) => candidate.id === savedRootId) ?? await api.get(savedRootId, signal)
+      : undefined;
     const validSavedRoot = savedRoot?.appProperties.product === 'solosync' && savedRoot.appProperties.role === 'root' && savedRoot.appProperties.format === '1' && !savedRoot.trashed
       ? savedRoot
       : undefined;
@@ -125,68 +172,69 @@ export class GoogleDriveProvider implements StorageProvider {
         id = await api.generateId(signal);
         await stableIds?.store(stableKey, id);
       }
-      await createFolderReconciled(api, { id, name: 'SoloSync Backups', parents: ['root'], appProperties: properties('root', 'SoloSync') }, signal);
+      const created = await createFolderReconciled(api, { id, name: 'SoloSync Backups', parents: ['root'], appProperties: properties('root', 'SoloSync') }, signal);
       roots = await api.listFolders({ product: 'solosync', role: 'root', format: '1' }, signal);
+      if (!roots.some((item) => item.id === created.id)) roots.push(created);
     }
     const root = canonical(roots);
     if (!root) throw new Error('SoloSync could not create its Google Drive folder.');
     await stableIds?.store(rootStableKey, root.id);
     await stableIds?.delete(`google-drive-folder-id:${logicalHash('SoloSync')}`);
-    const allProjects = (await Promise.all(roots.map((candidate) => api.listChildren(candidate.id, { product: 'solosync', role: 'project', format: '1' }, signal)))).flat();
-    const projectIds = [...new Set(allProjects.map((item) => item.appProperties.projectId).filter(Boolean))];
-    for (const projectId of projectIds) {
-      const matches = allProjects.filter((item) => item.appProperties.projectId === projectId);
-      let primary = canonical(matches.filter((item) => item.parents.includes(root.id)));
-      if (!primary) {
-        const key = `SoloSync/${projectId}`;
-        const stableKey = `google-drive-folder-id:${projectId}:${logicalHash(key)}`;
-        let id = await stableIds?.get(stableKey);
-        if (!id) {
-          id = await api.generateId(signal);
-          await stableIds?.store(stableKey, id);
-        }
-        primary = await createFolderReconciled(api, {
-          id,
-          name: canonical(matches)?.name ?? projectId,
-          parents: [root.id],
-          appProperties: properties('project', key, projectId),
-        }, signal);
-        await stableIds?.delete(stableKey);
-      }
-      const knownSnapshots = await api.listChildren(primary.id, { product: 'solosync', role: 'snapshot', projectId, format: '1' }, signal);
-      for (const duplicate of matches.filter((item) => item.id !== primary.id)) {
-        const snapshots = await api.listChildren(duplicate.id, { product: 'solosync', role: 'snapshot', projectId, format: '1' }, signal);
-        for (const snapshot of snapshots) {
-          if (knownSnapshots.some((item) => item.appProperties.snapshotId === snapshot.appProperties.snapshotId && item.id !== snapshot.id)) {
-            throw new Error(`Google Drive contains conflicting copies of snapshot ${snapshot.appProperties.snapshotId}.`);
+    if (roots.length > 1) {
+      const allProjects = (await Promise.all(roots.map((candidate) => api.listChildren(candidate.id, { product: 'solosync', role: 'project', format: '1' }, signal)))).flat();
+      const projectIds = [...new Set(allProjects.map((item) => item.appProperties.projectId).filter(Boolean))];
+      for (const projectId of projectIds) {
+        let matches = allProjects.filter((item) => item.appProperties.projectId === projectId);
+        let primary = canonical(matches.filter((item) => item.parents.includes(root.id)));
+        if (!primary) {
+          const key = `SoloSync/${projectId}`;
+          const stableKey = `google-drive-folder-id:${projectId}:${logicalHash(key)}`;
+          let id = await stableIds?.get(stableKey);
+          if (!id) {
+            id = await api.generateId(signal);
+            await stableIds?.store(stableKey, id);
           }
-          await api.update(snapshot.id, { addParent: primary.id, removeParent: duplicate.id }, signal);
-          knownSnapshots.push(snapshot);
+          primary = await createFolderReconciled(api, {
+            id,
+            name: canonical(matches)?.name ?? projectId,
+            parents: [root.id],
+            appProperties: properties('project', key, projectId),
+          }, signal);
+          await stableIds?.delete(stableKey);
+          matches = [primary, ...matches];
         }
-        await archiveMergedFolder(api, duplicate, 'merged-project', signal);
+        primary = await reconcileProjectCopies(api, projectId, matches, signal, primary) ?? primary;
+      }
+      for (const duplicate of roots.filter((item) => item.id !== root.id)) {
+        await archiveMergedFolder(api, duplicate, 'merged-root', signal);
       }
     }
-    for (const duplicate of roots.filter((item) => item.id !== root.id)) {
-      await archiveMergedFolder(api, duplicate, 'merged-root', signal);
-    }
-    return new GoogleDriveProvider(api, root.id, account, stableIds);
+    return new GoogleDriveProvider(api, root, account, stableIds);
   }
 
   private async project(projectId: string, create: boolean, signal?: AbortSignal): Promise<GoogleDriveItem | undefined> {
     const key = `SoloSync/${projectId}`;
     const stableKey = `google-drive-folder-id:${projectId}:${logicalHash(key)}`;
-    let projects = await this.api.listChildren(this.rootId, { product: 'solosync', role: 'project', projectId, format: '1' }, signal);
+    const cached = this.resolved.get(key);
+    if (cached) return cached;
+    if (this.resolved.has(key) && !create) return undefined;
+    let projects = this.resolved.has(key)
+      ? []
+      : await this.api.listChildren(this.rootId, { product: 'solosync', role: 'project', projectId, format: '1' }, signal);
     if (projects.length === 0 && create) {
       let id = await this.stableIds?.get(stableKey);
       if (!id) {
         id = await this.api.generateId(signal);
         await this.stableIds?.store(stableKey, id);
       }
-      await createFolderReconciled(this.api, { id, name: projectId, parents: [this.rootId], appProperties: properties('project', key, projectId) }, signal);
+      const created = await createFolderReconciled(this.api, { id, name: projectId, parents: [this.rootId], appProperties: properties('project', key, projectId) }, signal);
       projects = await this.api.listChildren(this.rootId, { product: 'solosync', role: 'project', projectId, format: '1' }, signal);
+      if (!projects.some((item) => item.id === created.id)) projects.push(created);
     }
     if (projects.length > 0) await this.stableIds?.delete(stableKey);
-    return canonical(projects);
+    const project = projects.length > 1 ? await reconcileProjectCopies(this.api, projectId, projects, signal) : canonical(projects);
+    this.resolved.set(key, project ?? null);
+    return project;
   }
 
   private async snapshots(projectId: string, lifecycle?: string, signal?: AbortSignal): Promise<GoogleDriveItem[]> {
@@ -198,32 +246,52 @@ export class GoogleDriveProvider implements StorageProvider {
   }
 
   private async snapshot(projectId: string, snapshotId: string, create = false, signal?: AbortSignal): Promise<GoogleDriveItem | undefined> {
-    let snapshots = (await this.snapshots(projectId, undefined, signal)).filter((item) => item.appProperties.snapshotId === snapshotId);
+    const stagingKey = `SoloSync/${projectId}/staging/${snapshotId}`;
+    const committedKey = `SoloSync/${projectId}/snapshots/${snapshotId}`;
+    const cached = this.resolved.get(stagingKey) ?? this.resolved.get(committedKey);
+    if (cached) return cached;
+    const project = await this.project(projectId, create, signal);
+    if (!project) return undefined;
+    let snapshots = await this.api.listChildren(project.id, { product: 'solosync', role: 'snapshot', projectId, snapshotId, format: '1' }, signal);
     if (snapshots.length > 1) throw new Error(`Google Drive contains conflicting copies of snapshot ${snapshotId}.`);
     if (snapshots.length === 0 && create) {
-      const project = await this.project(projectId, true, signal);
-      if (!project) throw new Error('SoloSync could not create the Google Drive project folder.');
-      const key = `SoloSync/${projectId}/staging/${snapshotId}`;
-      const stableKey = `google-drive-folder-id:${projectId}:${logicalHash(key)}`;
+      const stableKey = `google-drive-folder-id:${projectId}:${logicalHash(stagingKey)}`;
       let id = await this.stableIds?.get(stableKey);
       if (!id) {
         id = await this.api.generateId(signal);
         await this.stableIds?.store(stableKey, id);
       }
-      await createFolderReconciled(this.api, { id, name: snapshotId, parents: [project.id], appProperties: properties('snapshot', key, projectId, snapshotId, 'staging') }, signal);
-      snapshots = (await this.snapshots(projectId, undefined, signal)).filter((item) => item.appProperties.snapshotId === snapshotId);
+      const created = await createFolderReconciled(this.api, { id, name: snapshotId, parents: [project.id], appProperties: properties('snapshot', stagingKey, projectId, snapshotId, 'staging') }, signal);
+      snapshots = [created];
       if (snapshots.length > 0) await this.stableIds?.delete(stableKey);
     }
-    return canonical(snapshots);
+    const snapshot = canonical(snapshots);
+    if (snapshot) this.resolved.set(snapshot.appProperties.lifecycle === 'committed' ? committedKey : stagingKey, snapshot);
+    return snapshot;
   }
 
   private async resolve(key: string, signal?: AbortSignal): Promise<GoogleDriveItem | undefined> {
     const segments = parseKey(key);
-    if (segments.length === 1) return this.api.get(this.rootId, signal);
+    const normalized = segments.join('/');
+    const cached = this.resolved.get(normalized);
+    if (cached || this.resolved.has(normalized)) return cached ?? undefined;
+    if (segments.length === 1) return this.resolved.get('SoloSync') ?? undefined;
     const project = await this.project(segments[1], false, signal);
     if (segments.length === 2) return project;
     if (!project) return undefined;
-    if (segments.length === 3 && (segments[2] === 'staging' || segments[2] === 'snapshots')) return project;
+    if (segments.length === 3 && ['objects', 'staging', 'snapshots'].includes(segments[2])) return project;
+    if (segments[2] === 'objects' && segments.length === 4) {
+      const matches = await this.api.listChildren(project.id, { product: 'solosync', role: 'object', logicalKeyHash: logicalHash(normalized) }, signal);
+      if (matches.length > 1) {
+        const hashes = await Promise.all(matches.map((item) => this.api.hashFile(item.id, signal)));
+        if (hashes.some((hash) => hash !== segments[3])) throw new Error(`Google Drive contains conflicting copies of content object ${segments[3]}.`);
+        const primary = canonical(matches)!;
+        await Promise.all(matches.filter((item) => item.id !== primary.id).map((item) => this.api.trash(item.id, signal)));
+      }
+      const object = canonical(matches);
+      this.resolved.set(normalized, object ?? null);
+      return object;
+    }
     if (!['staging', 'snapshots'].includes(segments[2]) || !segments[3]) return undefined;
     let current = await this.snapshot(segments[1], segments[3], false, signal);
     if (!current || (segments[2] === 'staging' ? current.appProperties.lifecycle !== 'staging' : current.appProperties.lifecycle !== 'committed')) return undefined;
@@ -232,14 +300,19 @@ export class GoogleDriveProvider implements StorageProvider {
       const matches = await this.api.listChildren(current.id, { product: 'solosync', logicalKeyHash: logicalHash(currentKey) }, signal);
       if (matches.length > 1) throw new Error(`Google Drive contains conflicting copies of ${segments[index]}.`);
       current = canonical(matches);
+      this.resolved.set(currentKey, current ?? null);
       if (!current) return undefined;
     }
     return current;
   }
 
   async validate(signal?: AbortSignal): Promise<void> {
-    await this.api.about(signal);
-    if (!(await this.api.get(this.rootId, signal))) throw new Error('The SoloSync Backups folder is no longer available.');
+    if (signal?.aborted) throw new Error('The operation was canceled.');
+    const root = await this.api.get(this.rootId, signal);
+    if (!root || root.trashed || root.appProperties.product !== 'solosync' || root.appProperties.role !== 'root') {
+      throw new Error('The SoloSync Backups folder is no longer available.');
+    }
+    this.resolved.set('SoloSync', root);
   }
 
   async testConnection(signal?: AbortSignal): Promise<void> {
@@ -266,7 +339,7 @@ export class GoogleDriveProvider implements StorageProvider {
 
   async exists(key: string, signal?: AbortSignal): Promise<boolean> {
     const segments = parseKey(key);
-    if (segments.length === 3 && ['staging', 'snapshots'].includes(segments[2])) return Boolean(await this.project(segments[1], false, signal));
+    if (segments.length === 3 && ['objects', 'staging', 'snapshots'].includes(segments[2])) return Boolean(await this.project(segments[1], false, signal));
     return Boolean(await this.resolve(key, signal));
   }
 
@@ -301,8 +374,11 @@ export class GoogleDriveProvider implements StorageProvider {
     for (let index = 4; index < segments.length; index += 1) {
       const currentKey = segments.slice(0, index + 1).join('/');
       const stableKey = `google-drive-folder-id:${segments[1]}:${logicalHash(currentKey)}`;
-      const matches = await this.api.listChildren(parent.id, { product: 'solosync', logicalKeyHash: logicalHash(currentKey) }, signal);
-      let directory = canonical(matches);
+      const cached = this.resolved.get(currentKey);
+      let directory = cached ?? undefined;
+      if (!directory && !this.resolved.has(currentKey)) {
+        directory = canonical(await this.api.listChildren(parent.id, { product: 'solosync', logicalKeyHash: logicalHash(currentKey) }, signal));
+      }
       if (!directory) {
         let id = await this.stableIds?.get(stableKey);
         if (!id) {
@@ -317,6 +393,7 @@ export class GoogleDriveProvider implements StorageProvider {
         }, signal);
       }
       await this.stableIds?.delete(stableKey);
+      this.resolved.set(currentKey, directory);
       parent = directory;
     }
   }
@@ -329,7 +406,13 @@ export class GoogleDriveProvider implements StorageProvider {
     const parent = await this.resolve(parentKey, signal);
     if (!parent) throw new Error('SoloSync could not resolve the Google Drive parent folder.');
     const existing = await this.resolve(key, signal);
-    if (existing) throw new Error('A Google Drive snapshot file already exists for this backup path.');
+    if (existing) {
+      if (await this.api.hashFile(existing.id, signal) !== await sourceHash(source)) {
+        throw new Error('Google Drive contains different data for this backup path.');
+      }
+      this.resolved.set(segments.join('/'), existing);
+      return;
+    }
     const stableKey = `google-drive-file-id:${segments[1]}:${logicalHash(key)}`;
     let id = await this.stableIds?.get(stableKey);
     if (!id) {
@@ -338,13 +421,15 @@ export class GoogleDriveProvider implements StorageProvider {
     }
     const snapshotId = segments[3] ?? '';
     const projectId = segments[1] ?? '';
-    const snapshot = snapshotId ? await this.snapshot(projectId, snapshotId, false, signal) : undefined;
-    await this.api.uploadFile({
+    const isObject = segments[2] === 'objects' && segments.length === 4;
+    const snapshot = !isObject && snapshotId ? await this.snapshot(projectId, snapshotId, false, signal) : undefined;
+    const uploaded = await this.api.uploadFile({
       id,
       name: segments.at(-1)!,
       parents: [parent.id],
-      appProperties: properties('file', key, projectId, snapshotId, snapshot?.appProperties.lifecycle ?? ''),
+      appProperties: properties(isObject ? 'object' : 'file', key, projectId, isObject ? '' : snapshotId, snapshot?.appProperties.lifecycle ?? ''),
     }, source, signal);
+    this.resolved.set(segments.join('/'), uploaded);
     await this.stableIds?.delete(stableKey);
     if (segments.at(-1) === 'manifest.json') {
       try {
@@ -388,10 +473,26 @@ export class GoogleDriveProvider implements StorageProvider {
     }
     const snapshot = await this.snapshot(sourceSegments[1], sourceSegments[3], false, signal);
     if (!snapshot) throw new Error('The Google Drive staging snapshot was not found.');
-    await this.api.update(snapshot.id, {
-      name: destinationSegments[3],
-      appProperties: { ...snapshot.appProperties, lifecycle: 'committed', logicalKeyHash: logicalHash(destination) },
-    }, signal);
+    const expectedProperties = { ...snapshot.appProperties, lifecycle: 'committed', logicalKeyHash: logicalHash(destination) };
+    let moved: GoogleDriveItem;
+    try {
+      moved = await this.api.update(snapshot.id, { name: destinationSegments[3], appProperties: expectedProperties }, signal);
+    } catch (error) {
+      this.resolved.delete(source);
+      this.resolved.delete(destination);
+      const reconciled = await this.api.get(snapshot.id, signal).catch(() => undefined);
+      const matches = reconciled?.name === destinationSegments[3]
+        && reconciled.parents.includes(snapshot.parents[0])
+        && Object.entries(expectedProperties).every(([key, value]) => reconciled.appProperties[key] === value);
+      if (!reconciled || !matches) throw error;
+      moved = reconciled;
+    }
+    const sourcePrefix = `${source}/`;
+    for (const [key, item] of [...this.resolved.entries()]) {
+      if (key !== source && !key.startsWith(sourcePrefix)) continue;
+      this.resolved.delete(key);
+      this.resolved.set(`${destination}${key.slice(source.length)}`, key === source ? moved : item);
+    }
   }
 
   async delete(key: string, signal?: AbortSignal): Promise<void> {
@@ -400,5 +501,9 @@ export class GoogleDriveProvider implements StorageProvider {
     if (segments.length === 1) throw new Error('SoloSync will not delete the Google Drive backup root.');
     const item = await this.resolve(key, signal);
     if (item && item.id !== this.rootId) await this.api.trash(item.id, signal);
+    const normalized = segments.join('/');
+    for (const cached of [...this.resolved.keys()]) {
+      if (cached === normalized || cached.startsWith(`${normalized}/`)) this.resolved.delete(cached);
+    }
   }
 }

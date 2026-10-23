@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync",
   "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "onCommand:solosync.configureSource",
     "onCommand:solosync.configure",
     "onCommand:solosync.openSettings",
+    "onCommand:solosync.showLogs",
     "onCommand:solosync.backupNow",
     "onCommand:solosync.cancelBackup",
     "onCommand:solosync.browseBackups",
@@ -70,6 +71,12 @@
         "title": "SoloSync: Backup Settings",
         "category": "SoloSync",
         "icon": "$(gear)"
+      },
+      {
+        "command": "solosync.showLogs",
+        "title": "SoloSync: Show Backup Logs",
+        "category": "SoloSync",
+        "icon": "$(output)"
       },
       {
         "command": "solosync.backupNow",

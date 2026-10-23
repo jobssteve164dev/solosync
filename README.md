@@ -14,6 +14,8 @@ SoloSync protects the code that Git has not protected yet. It creates restorable
 - Verifies every restored snapshot with SHA-256 hashes.
 - Backs up only the project folder you explicitly choose, even when VS Code has a broader parent folder open.
 - Shows scanning and copying progress with a Cancel button that discards the incomplete snapshot.
+- Reuses unchanged file contents across snapshots instead of uploading another complete directory tree.
+- Records connection time, each scanning/copying/upload/verification/publication phase duration, and total elapsed time in **SoloSync: Show Backup Logs** without writing file contents, local paths, credentials, or raw provider errors to the log.
 
 SoloSync never synchronizes remote deletions back into your workspace. The first release also never deletes old snapshots automatically.
 
@@ -41,12 +43,15 @@ Use **Restore File** when only one file is needed. You select the file from the 
 Snapshots use this structure inside your chosen location:
 
 ```text
-SoloSync/<project-id>/snapshots/<snapshot-id>/
-  manifest.json
-  files/<workspace-root>/...
+SoloSync/<project-id>/
+  objects/<sha256>                 # one verified copy of each distinct file content
+  snapshots/<snapshot-id>/
+    manifest.json                  # the complete restorable file list for this point in time
 ```
 
-The manifest contains relative paths, file sizes, timestamps, SHA-256 hashes, and optional Git context. It does not store the original absolute workspace path.
+Each snapshot is logically complete, but its unchanged bytes are not copied again. The manifest maps every relative project path to a stable SHA-256 content object, so old and new snapshots remain independently restorable while a repeated unchanged snapshot uploads only its manifest. Snapshots created by older SoloSync versions with files inside each snapshot remain readable and restorable. The manifest never stores the original absolute workspace path.
+
+For an empty project or a small-file snapshot, the Google Drive path is kept below 30 sequential remote requests, which keeps the complete operation inside 30 seconds when a Drive request takes no more than one second and the account is not being throttled. Files up to 5 MiB use one multipart upload request; larger files retain resumable upload protection with 8 MiB chunks. Actual time for large or numerous changed files still depends on the bytes that must cross the network.
 
 ## Defaults and exclusions
 

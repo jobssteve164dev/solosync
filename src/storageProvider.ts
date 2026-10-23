@@ -12,6 +12,7 @@ export interface StorageEntry {
 export interface StorageProvider {
   readonly displayName: string;
   readonly localRoot?: string;
+  readonly commitResponseIsAuthoritative?: boolean;
   validate(signal?: AbortSignal): Promise<void>;
   testConnection(signal?: AbortSignal): Promise<void>;
   exists(key: string, signal?: AbortSignal): Promise<boolean>;

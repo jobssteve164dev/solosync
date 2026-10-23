@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.11
+
+- Store new snapshots as complete manifests backed by stable SHA-256 content objects, so unchanged files are reused instead of copied into every snapshot folder.
+- Keep all format-1 snapshots readable, verifiable, and restorable while publishing new snapshots in the incremental format.
+- Cut the first small Google Drive snapshot path from 104 provider operations to a tested sub-30-request budget, reuse the active Drive connection, and avoid rereading all history after a successful backup.
+- Upload files up to 5 MiB in one multipart request and increase resumable chunks from 256 KiB to 8 MiB for larger changes.
+- Show real scanning, copying, uploading, verification, publication, and elapsed-time phases in the progress notification and **SoloSync: Show Backup Logs**.
+- Reconcile lost Drive responses and concurrent first-time folder creation, and repair damaged content objects before a new snapshot is published.
+
 ## 0.0.10
 
 - Fix hosted Google Drive sign-in on Cloudflare Workers by invoking the runtime `fetch` function without an invalid object receiver.

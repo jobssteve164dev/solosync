@@ -53,6 +53,7 @@ test('sidebar exposes setup, settings, and recovery entry points', () => {
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.connectGoogleDrive'));
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.disconnectGoogleDrive'));
   assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.revokeGoogleDrive'));
+  assert.ok(manifest.contributes.commands.some((item) => item.command === 'solosync.showLogs'));
   assert.equal(
     manifest.contributes.commands.find((item) => item.command === 'solosync.openSettings').title,
     'SoloSync: Backup Settings',

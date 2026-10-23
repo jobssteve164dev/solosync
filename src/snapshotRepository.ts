@@ -39,7 +39,11 @@ export interface BackupProject {
 export type SnapshotProgress =
   | { phase: 'scanning'; discovered: number }
   | { phase: 'copying'; completed: number; total: number; current: string }
-  | { phase: 'finalizing'; total: number };
+  | { phase: 'finalizing'; total: number }
+  | { phase: 'uploading'; completed: number; total: number; reused: number; current?: string }
+  | { phase: 'verifying'; completed: number; total: number }
+  | { phase: 'publishing' }
+  | { phase: 'complete'; total: number; durationMs: number };
 
 export class SnapshotCancelledError extends Error {
   constructor() {
@@ -118,7 +122,7 @@ function storageKey(...segments: string[]): string {
 
 function parseManifest(contents: Buffer): SnapshotManifest {
   const value = JSON.parse(contents.toString('utf8')) as Partial<SnapshotManifest>;
-  if (value.formatVersion !== 1 || typeof value.snapshotId !== 'string' || typeof value.projectId !== 'string' || typeof value.projectName !== 'string' || typeof value.createdAt !== 'string' || !Array.isArray(value.files)) {
+  if (![1, 2].includes(value.formatVersion ?? 0) || typeof value.snapshotId !== 'string' || typeof value.projectId !== 'string' || typeof value.projectName !== 'string' || typeof value.createdAt !== 'string' || !Array.isArray(value.files)) {
     throw new Error('The snapshot manifest is invalid.');
   }
   for (const file of value.files as Array<Partial<SnapshotFile>>) {
@@ -128,6 +132,51 @@ function parseManifest(contents: Buffer): SnapshotManifest {
     normalizeStorageKey(`${file.root}/${file.path}`);
   }
   return value as SnapshotManifest;
+}
+
+function storedFileKey(manifest: SnapshotManifest, file: SnapshotFile, lifecycle: 'staging' | 'snapshots' = 'snapshots'): string {
+  return manifest.formatVersion === 2
+    ? storageKey('SoloSync', manifest.projectId, 'objects', file.sha256)
+    : storageKey('SoloSync', manifest.projectId, lifecycle, manifest.snapshotId, 'files', file.root, ...file.path.split('/'));
+}
+
+async function uploadContentObjects(provider: StorageProvider, localSnapshotDirectory: string, manifest: SnapshotManifest, options: CreateSnapshotOptions): Promise<void> {
+  const objectsDirectory = storageKey('SoloSync', manifest.projectId, 'objects');
+  await provider.createDirectory(objectsDirectory, options.signal);
+  const uniqueFiles = [...new Map(manifest.files.map((file) => [file.sha256, file])).values()];
+  const pendingVerification: Array<{ file: SnapshotFile; remote: string; local: string; uploaded: boolean }> = [];
+  let reused = 0;
+  options.onProgress?.({ phase: 'uploading', completed: 0, total: uniqueFiles.length, reused });
+  for (const [index, file] of uniqueFiles.entries()) {
+    throwIfCancelled(options.signal);
+    const remote = storageKey(objectsDirectory, file.sha256);
+    const local = path.join(localSnapshotDirectory, 'files', file.root, ...file.path.split('/'));
+    if (await provider.exists(remote, options.signal)) {
+      reused += 1;
+      pendingVerification.push({ file, remote, local, uploaded: false });
+    } else {
+      await provider.writeFile(remote, local, options.signal);
+      pendingVerification.push({ file, remote, local, uploaded: true });
+    }
+    options.onProgress?.({ phase: 'uploading', completed: index + 1, total: uniqueFiles.length, reused, current: file.path });
+  }
+  options.onProgress?.({ phase: 'verifying', completed: 0, total: pendingVerification.length });
+  for (const [index, item] of pendingVerification.entries()) {
+    let verified = await provider.hashFile(item.remote, options.signal) === item.file.sha256;
+    if (!verified && !item.uploaded) {
+      await provider.delete(item.remote, options.signal);
+      await provider.writeFile(item.remote, item.local, options.signal);
+      verified = await provider.hashFile(item.remote, options.signal) === item.file.sha256;
+    }
+    if (!verified) {
+      await provider.delete(item.remote).catch(() => undefined);
+      throw new Error(`The uploaded copy of ${item.file.path} failed verification.`);
+    }
+    options.onProgress?.({ phase: 'verifying', completed: index + 1, total: pendingVerification.length });
+  }
+  if (pendingVerification.length === 0) {
+    options.onProgress?.({ phase: 'verifying', completed: 0, total: 0 });
+  }
 }
 
 async function uploadDirectory(provider: StorageProvider, localDirectory: string, remoteDirectory: string, signal?: AbortSignal, root = true): Promise<void> {
@@ -186,6 +235,7 @@ export function projectIdFor(roots: WorkspaceRoot[]): string {
 
 export class SnapshotRepository {
   async create(options: CreateSnapshotOptions): Promise<SnapshotManifest> {
+    const startedAt = Date.now();
     let resumedManifest: SnapshotManifest | undefined;
     let resumedJob: PendingBackupJob | undefined;
     if (options.pendingDirectory) {
@@ -226,6 +276,7 @@ export class SnapshotRepository {
       } else {
       const plannedRoots: Array<{ root: WorkspaceRoot; rootName: string; files: Array<{ absolute: string; relative: string }> }> = [];
       let estimatedBytes = 0;
+      options.onProgress?.({ phase: 'scanning', discovered: 0 });
       for (const root of options.roots) {
         const files = await collectFiles(root, options);
         for (const file of files) estimatedBytes += (await stat(file.absolute)).size;
@@ -247,10 +298,13 @@ export class SnapshotRepository {
           destinationIdentity: options.pendingDestinationIdentity,
         });
       }
+      const totalPlannedFiles = plannedRoots.reduce((total, item) => total + item.files.length, 0);
+      let copiedFiles = 0;
+      options.onProgress?.({ phase: 'copying', completed: 0, total: totalPlannedFiles, current: '' });
       for (const { rootName, files } of plannedRoots) {
         throwIfCancelled(options.signal);
-        const progressInterval = Math.max(1, Math.floor(files.length / 100));
-        for (const [index, file] of files.entries()) {
+        const progressInterval = Math.max(1, Math.floor(totalPlannedFiles / 100));
+        for (const file of files) {
           throwIfCancelled(options.signal);
           const destination = path.join(localSnapshotDirectory, 'files', rootName, file.relative);
           if (options.pendingDirectory) await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
@@ -258,16 +312,16 @@ export class SnapshotRepository {
           if (options.pendingDirectory) await chmod(destination, 0o600);
           totalBytes += copied.size;
           manifestFiles.push({ root: rootName, path: file.relative.split(path.sep).join('/'), ...copied });
-          const completed = index + 1;
-          if (completed === files.length || completed % progressInterval === 0) {
-            options.onProgress?.({ phase: 'copying', completed, total: files.length, current: file.relative });
+          copiedFiles += 1;
+          if (copiedFiles === totalPlannedFiles || copiedFiles % progressInterval === 0) {
+            options.onProgress?.({ phase: 'copying', completed: copiedFiles, total: totalPlannedFiles, current: file.relative });
           }
         }
       }
       throwIfCancelled(options.signal);
       options.onProgress?.({ phase: 'finalizing', total: manifestFiles.length });
       manifest = {
-        formatVersion: 1,
+        formatVersion: 2,
         snapshotId,
         projectId: options.projectId,
         projectName: options.projectName,
@@ -299,34 +353,48 @@ export class SnapshotRepository {
       await updatePendingState('uploading');
       if (options.pendingDirectory && await options.provider.exists(finalDirectory, options.signal)) {
         const committedManifest = parseManifest(await options.provider.readFile(storageKey(finalDirectory, 'manifest.json'), options.signal));
-        if (committedManifest.snapshotId !== readyManifest.snapshotId || committedManifest.projectId !== readyManifest.projectId || committedManifest.files.length !== readyManifest.files.length) {
+        if (JSON.stringify(committedManifest) !== JSON.stringify(readyManifest)) {
           throw new Error('The published Google Drive snapshot does not match the pending backup.');
         }
         for (const file of readyManifest.files) {
-          const remote = storageKey(finalDirectory, 'files', file.root, ...file.path.split('/'));
+          const remote = storedFileKey(readyManifest, file);
           if (await options.provider.hashFile(remote, options.signal) !== file.sha256) throw new Error(`The published copy of ${file.path} failed verification.`);
         }
         published = true;
         await updatePendingState('committed');
+        options.onProgress?.({ phase: 'complete', total: readyManifest.files.length, durationMs: Date.now() - startedAt });
         return readyManifest;
       }
       await options.provider.createDirectory(storageKey(projectDirectory, 'staging'), options.signal);
       await options.provider.createDirectory(storageKey(projectDirectory, 'snapshots'), options.signal);
-      await uploadDirectory(options.provider, localSnapshotDirectory, stagingDirectory, options.signal);
+      if (readyManifest.formatVersion === 2) {
+        await uploadContentObjects(options.provider, localSnapshotDirectory, readyManifest, options);
+        await options.provider.createDirectory(stagingDirectory, options.signal);
+        await options.provider.writeFile(storageKey(stagingDirectory, 'manifest.json'), path.join(localSnapshotDirectory, 'manifest.json'), options.signal);
+      } else {
+        options.onProgress?.({ phase: 'uploading', completed: 0, total: readyManifest.files.length, reused: 0 });
+        await uploadDirectory(options.provider, localSnapshotDirectory, stagingDirectory, options.signal);
+        options.onProgress?.({ phase: 'uploading', completed: readyManifest.files.length, total: readyManifest.files.length, reused: 0 });
+      }
       const uploadedManifest = parseManifest(await options.provider.readFile(storageKey(stagingDirectory, 'manifest.json'), options.signal));
       if (uploadedManifest.snapshotId !== readyManifest.snapshotId || uploadedManifest.projectId !== readyManifest.projectId || uploadedManifest.files.length !== readyManifest.files.length) {
         throw new Error('The backup location returned an incomplete snapshot manifest.');
       }
-      for (const file of readyManifest.files) {
-        throwIfCancelled(options.signal);
-        const remote = storageKey(stagingDirectory, 'files', file.root, ...file.path.split('/'));
-        if (await options.provider.hashFile(remote, options.signal) !== file.sha256) {
-          throw new Error(`The uploaded copy of ${file.path} failed verification.`);
+      if (readyManifest.formatVersion === 1) {
+        options.onProgress?.({ phase: 'verifying', completed: 0, total: readyManifest.files.length });
+        for (const file of readyManifest.files) {
+          throwIfCancelled(options.signal);
+          const remote = storedFileKey(readyManifest, file, 'staging');
+          if (await options.provider.hashFile(remote, options.signal) !== file.sha256) {
+            throw new Error(`The uploaded copy of ${file.path} failed verification.`);
+          }
+          options.onProgress?.({ phase: 'verifying', completed: readyManifest.files.indexOf(file) + 1, total: readyManifest.files.length });
         }
       }
       await updatePendingState('verified');
       throwIfCancelled(options.signal);
       await updatePendingState('publishing');
+      options.onProgress?.({ phase: 'publishing' });
       await options.provider.move(stagingDirectory, finalDirectory, options.signal);
       remoteCommitted = true;
       await updatePendingState('committed');
@@ -339,11 +407,14 @@ export class SnapshotRepository {
         updatedAt: readyManifest.createdAt,
       };
       await options.provider.writeFile(storageKey(projectDirectory, 'project.json'), Buffer.from(`${JSON.stringify(project, null, 2)}\n`), options.signal);
-      const confirmed = await this.list(options.provider, options.projectId, options.signal);
-      if (!confirmed.some((item) => item.snapshotId === readyManifest.snapshotId)) {
-        throw new Error('The snapshot was written but could not be confirmed in backup history.');
+      if (!options.provider.commitResponseIsAuthoritative) {
+        const confirmed = await this.list(options.provider, options.projectId, options.signal);
+        if (!confirmed.some((item) => item.snapshotId === readyManifest.snapshotId)) {
+          throw new Error('The snapshot was written but could not be confirmed in backup history.');
+        }
       }
       published = true;
+      options.onProgress?.({ phase: 'complete', total: readyManifest.files.length, durationMs: Date.now() - startedAt });
       return readyManifest;
     } catch (error) {
       if (options.pendingDirectory && !frozen) await rm(options.pendingDirectory, { recursive: true, force: true });
@@ -416,10 +487,9 @@ export class SnapshotRepository {
   }
 
   async verify(provider: StorageProvider, manifest: SnapshotManifest): Promise<{ valid: boolean; checked: number; errors: string[] }> {
-    const base = storageKey('SoloSync', manifest.projectId, 'snapshots', manifest.snapshotId, 'files');
     const errors: string[] = [];
     for (const file of manifest.files) {
-      const source = storageKey(base, file.root, ...file.path.split('/'));
+      const source = storedFileKey(manifest, file);
       try {
         if (await provider.hashFile(source) !== file.sha256) {
           errors.push(file.path);
@@ -432,10 +502,9 @@ export class SnapshotRepository {
   }
 
   async restoreAll(provider: StorageProvider, manifest: SnapshotManifest, destination: string): Promise<void> {
-    const base = storageKey('SoloSync', manifest.projectId, 'snapshots', manifest.snapshotId, 'files');
     await mkdir(destination, { recursive: true });
     for (const file of manifest.files) {
-      const source = storageKey(base, file.root, ...file.path.split('/'));
+      const source = storedFileKey(manifest, file);
       const target = path.join(destination, file.root, ...file.path.split('/'));
       await mkdir(path.dirname(target), { recursive: true });
       await provider.downloadFile(source, target);
@@ -447,7 +516,7 @@ export class SnapshotRepository {
   }
 
   async restoreFile(provider: StorageProvider, manifest: SnapshotManifest, file: SnapshotFile, destination: string): Promise<void> {
-    const source = storageKey('SoloSync', manifest.projectId, 'snapshots', manifest.snapshotId, 'files', file.root, ...file.path.split('/'));
+    const source = storedFileKey(manifest, file);
     const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.solosync-${randomUUID()}`);
     try {
       await provider.downloadFile(source, temporary);

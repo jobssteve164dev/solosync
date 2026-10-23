@@ -29,6 +29,11 @@ const googleDriveUploadSessionKeys = 'googleDriveUploadSessionKeys';
 const googleDesktopClientId = '336337797433-2kq8097ud0820baii6m26k53gv2pm95t.apps.googleusercontent.com';
 const googleBrokerUrl = 'https://solosync.szlk.uk';
 const googleTokenManagers = new GoogleTokenManagerCache();
+const googleDriveProviders = new WeakMap<vscode.ExtensionContext, Promise<GoogleDriveProvider>>();
+
+function elapsed(milliseconds: number): string {
+  return milliseconds < 1_000 ? `${milliseconds} ms` : `${(milliseconds / 1_000).toFixed(1)} s`;
+}
 
 function sourceDirectory(): string | undefined {
   const value = config().get<string>('sourceDirectory', '').trim();
@@ -210,7 +215,17 @@ async function configuredProvider(context: vscode.ExtensionContext, signal?: Abo
   }
   if (kind === 'googleDrive') {
     if (!context.globalState.get<boolean>(googleDriveConnectedKey, false)) return undefined;
-    return GoogleDriveProvider.connect(googleDriveClient(context), googleDriveStableIds(context), signal);
+    let connection = googleDriveProviders.get(context);
+    if (!connection) {
+      connection = GoogleDriveProvider.connect(googleDriveClient(context), googleDriveStableIds(context), signal);
+      googleDriveProviders.set(context, connection);
+    }
+    try {
+      return await connection;
+    } catch (error) {
+      googleDriveProviders.delete(context);
+      throw error;
+    }
   }
   const directory = backupDirectory();
   return directory ? new LocalFileSystemProvider(directory) : undefined;
@@ -249,17 +264,19 @@ async function validateProvider(provider: StorageProvider, roots: WorkspaceRoot[
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const tree = new HistoryTreeProvider();
   const treeView = vscode.window.createTreeView('solosync.history', { treeDataProvider: tree });
+  const output = vscode.window.createOutputChannel('SoloSync');
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   status.command = 'solosync.backupNow';
   status.text = '$(archive) SoloSync';
   status.tooltip = 'Create a workspace snapshot';
   status.show();
-  context.subscriptions.push(status, treeView);
+  context.subscriptions.push(status, treeView, output);
 
   let running: Promise<SnapshotManifest | undefined> | undefined;
   let activeBackupController: AbortController | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let lastHead = context.workspaceState.get<string>('lastObservedHead');
+  let currentSnapshots: SnapshotManifest[] = [];
 
   const refresh = async (): Promise<void> => {
     const roots = protectedRoots();
@@ -290,7 +307,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provider = undefined;
     }
 
-    tree.setSnapshots([]);
+    currentSnapshots = [];
+    tree.setSnapshots(currentSnapshots);
     treeView.message = undefined;
     if (!sourceAvailable) {
       if (provider) {
@@ -323,7 +341,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       status.command = 'solosync.backupNow';
       status.text = '$(archive) SoloSync';
       status.tooltip = `Back up ${roots[0].name}`;
-      tree.setSnapshots(snapshots);
+      currentSnapshots = snapshots;
+      tree.setSnapshots(currentSnapshots);
     } catch {
       await vscode.commands.executeCommand('setContext', 'solosync.backupLocationAvailable', false);
       status.command = 'solosync.configure';
@@ -337,6 +356,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return running;
     }
     running = (async () => {
+      const operationStartedAt = Date.now();
+      let lastLoggedPhase = '';
+      let phaseStartedAt = operationStartedAt;
       let roots = protectedRoots();
       if (roots.length === 0) {
         const selected = await chooseSourceDirectory();
@@ -350,6 +372,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       status.text = '$(sync~spin) SoloSync: Connecting';
       status.command = 'solosync.cancelBackup';
       status.tooltip = 'Click to cancel this backup';
+      output.appendLine(`[${new Date().toISOString()}] Backup started · ${projectName(roots)} · ${reason}`);
       await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', true);
       try {
         provider = await configuredProvider(context, connectionController.signal);
@@ -364,14 +387,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!provider) return undefined;
         await validateProvider(provider, roots, connectionController.signal);
         connectionReady = true;
+        output.appendLine(`Connected · ${provider.displayName} · ${elapsed(Date.now() - operationStartedAt)}`);
       } catch (error) {
         if (connectionController.signal.aborted) {
           status.text = '$(circle-slash) SoloSync: Backup canceled';
           status.tooltip = 'No snapshot was created';
+          output.appendLine(`Canceled · ${elapsed(Date.now() - operationStartedAt)}`);
           void vscode.window.showInformationMessage('SoloSync backup canceled. No snapshot was created.');
           return undefined;
         }
         const message = error instanceof Error ? error.message : String(error);
+        output.appendLine(`Failed while connecting · ${elapsed(Date.now() - operationStartedAt)}`);
         void vscode.window.showErrorMessage(message, 'Set Backup Location').then((action) => {
           if (action === 'Set Backup Location') void vscode.commands.executeCommand('solosync.configure');
         });
@@ -443,14 +469,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               git,
               signal: controller.signal,
               onProgress: (event) => {
+                if (event.phase !== lastLoggedPhase || event.phase === 'complete') {
+                  const now = Date.now();
+                  if (lastLoggedPhase) {
+                    output.appendLine(`${lastLoggedPhase[0].toUpperCase()}${lastLoggedPhase.slice(1)} complete · ${elapsed(now - phaseStartedAt)}`);
+                  }
+                  lastLoggedPhase = event.phase;
+                  phaseStartedAt = now;
+                  const details = event.phase === 'uploading'
+                    ? ` · ${event.completed}/${event.total} objects · ${event.reused} reused`
+                    : event.phase === 'verifying'
+                      ? ` · ${event.completed}/${event.total} objects`
+                      : event.phase === 'complete'
+                        ? ` · ${event.total} files · repository ${elapsed(event.durationMs)} · total ${elapsed(Date.now() - operationStartedAt)}`
+                        : event.phase === 'scanning'
+                          ? ` · ${event.discovered} files`
+                          : event.phase === 'copying'
+                            ? ` · ${event.completed}/${event.total}`
+                            : event.phase === 'finalizing'
+                              ? ` · ${event.total} files`
+                              : '';
+                  if (event.phase === 'complete') output.appendLine(`Complete${details}`);
+                  else output.appendLine(`${event.phase[0].toUpperCase()}${event.phase.slice(1)} started${details}`);
+                }
                 if (event.phase === 'scanning') {
                   progress.report({ message: `Scanning · ${event.discovered.toLocaleString()} files found` });
                 } else if (event.phase === 'copying') {
                   const increment = event.total > 0 ? ((event.completed - lastCompleted) / event.total) * 100 : 100;
                   lastCompleted = event.completed;
                   progress.report({ increment, message: `Copying · ${event.completed.toLocaleString()} of ${event.total.toLocaleString()}` });
-                } else {
+                } else if (event.phase === 'finalizing') {
                   progress.report({ message: `Finalizing · ${event.total.toLocaleString()} files` });
+                } else if (event.phase === 'uploading') {
+                  progress.report({ message: `Uploading · ${event.completed.toLocaleString()} of ${event.total.toLocaleString()} objects · ${event.reused.toLocaleString()} reused` });
+                } else if (event.phase === 'verifying') {
+                  progress.report({ message: `Verifying · ${event.completed.toLocaleString()} of ${event.total.toLocaleString()} objects` });
+                } else if (event.phase === 'publishing') {
+                  progress.report({ message: 'Publishing snapshot' });
                 }
               },
             });
@@ -465,12 +520,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         lastHead = git.head;
         status.text = '$(verified-filled) SoloSync: Protected';
         status.tooltip = `Last backup ${new Date(manifest.createdAt).toLocaleString()}`;
-        await refresh();
+        currentSnapshots = [manifest, ...currentSnapshots.filter((snapshot) => snapshot.snapshotId !== manifest.snapshotId)]
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        tree.setSnapshots(currentSnapshots);
         return manifest;
       } catch (error) {
         if (error instanceof SnapshotCancelledError) {
           status.text = '$(circle-slash) SoloSync: Backup canceled';
           status.tooltip = 'No snapshot was created';
+          output.appendLine(`Canceled · ${elapsed(Date.now() - operationStartedAt)}`);
           void vscode.window.showInformationMessage('SoloSync backup canceled. No snapshot was created.');
           await refresh();
           return undefined;
@@ -478,6 +536,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         status.text = '$(error) SoloSync: Backup failed';
         status.tooltip = 'Backup failed. Click to try again.';
         const message = error instanceof Error ? error.message : String(error);
+        const phase = lastLoggedPhase || 'preparing';
+        output.appendLine(`Failed during ${phase} · phase ${elapsed(Date.now() - phaseStartedAt)} · total ${elapsed(Date.now() - operationStartedAt)}`);
         void vscode.window.showErrorMessage(`SoloSync could not create the backup: ${message}`);
         return undefined;
       } finally {
@@ -558,6 +618,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (action === 'Browse Backups') await browseBackups(context);
     }),
     vscode.commands.registerCommand('solosync.openSettings', () => openBackupSettings(context, refresh)),
+    vscode.commands.registerCommand('solosync.showLogs', () => output.show(true)),
     vscode.commands.registerCommand('solosync.connectGoogleDrive', async () => {
       if (await configureGoogleDrive(context)) await refresh();
     }),
@@ -744,6 +805,7 @@ async function configureGoogleDrive(context: vscode.ExtensionContext, signal?: A
     await context.globalState.update(googleDriveAccountKey, provider.account.emailAddress ?? provider.account.displayName ?? 'Google account');
     await context.globalState.update(googleDriveConnectedKey, true);
     await context.globalState.update('backupLocationKind', 'googleDrive');
+    googleDriveProviders.set(context, Promise.resolve(provider));
     return provider;
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -775,6 +837,7 @@ async function disconnectGoogleDrive(context: vscode.ExtensionContext, revoke: b
     await context.globalState.update(googleDriveConnectedKey, false);
     await context.globalState.update(googleDriveAccountKey, undefined);
     if (backupLocationKind(context) === 'googleDrive') await context.globalState.update('backupLocationKind', undefined);
+    googleDriveProviders.delete(context);
     void vscode.window.showInformationMessage(revoke ? 'Google Drive access was revoked. Your existing backups were not deleted.' : 'Google Drive was disconnected. Your existing backups were not deleted.');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

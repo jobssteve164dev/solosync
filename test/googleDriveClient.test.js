@@ -44,6 +44,32 @@ test('lists all Drive pages with an authenticated app-property query', async () 
   assert.match(requests[0].url.searchParams.get('q'), /project\\'1/);
 });
 
+test('uploads a small file and its metadata in one multipart request', async () => {
+  const requests = [];
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async (input, init) => {
+      requests.push({ url: String(input), headers: init.headers, body: Buffer.from(init.body) });
+      return Response.json({
+        id: 'small-file', name: 'small.txt', mimeType: 'application/octet-stream', parents: ['parent'],
+        appProperties: { product: 'solosync', projectId: 'project-1' }, size: '5',
+      });
+    },
+  });
+
+  const uploaded = await client.uploadFile({
+    id: 'small-file', name: 'small.txt', parents: ['parent'], appProperties: { product: 'solosync', projectId: 'project-1' },
+  }, Buffer.from('small'));
+
+  assert.equal(uploaded.id, 'small-file');
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /uploadType=multipart/);
+  assert.match(requests[0].headers['content-type'], /^multipart\/related; boundary=/);
+  assert.match(requests[0].body.toString('utf8'), /"parents":\["parent"\]/);
+  assert.ok(requests[0].body.includes(Buffer.from('small')));
+});
+
 test('uploads resumable chunks and removes the credential-bearing session URI', async () => {
   const sessions = new Map();
   const storedSessionKeys = [];
@@ -62,21 +88,21 @@ test('uploads resumable chunks and removes the credential-bearing session URI', 
       }
       if (url === 'https://upload.example/session-1') {
         puts.push({ range: init.headers['content-range'], length: Buffer.from(await new Response(init.body).arrayBuffer()).length });
-        if (puts.length === 1) return new Response(null, { status: 308, headers: { range: 'bytes=0-262143' } });
-        return new Response(JSON.stringify({ id: 'file-1', name: 'large.bin', mimeType: 'application/octet-stream', parents: ['parent'], appProperties: { product: 'solosync' }, size: '524288' }), { status: 200 });
+        const acknowledged = puts.reduce((total, put) => total + put.length, 0);
+        if (acknowledged < 18 * 1024 * 1024) return new Response(null, { status: 308, headers: { range: `bytes=0-${acknowledged - 1}` } });
+        return new Response(JSON.stringify({ id: 'file-1', name: 'large.bin', mimeType: 'application/octet-stream', parents: ['parent'], appProperties: { product: 'solosync' }, size: String(18 * 1024 * 1024) }), { status: 200 });
       }
       throw new Error(`Unexpected request: ${url}`);
     },
   });
-  const content = Buffer.alloc(512 * 1024, 7);
+  const content = Buffer.alloc(18 * 1024 * 1024, 7);
 
   const result = await client.uploadFile({ id: 'file-1', name: 'large.bin', parents: ['parent'], appProperties: { product: 'solosync', projectId: 'project-1' } }, content);
 
   assert.equal(result.id, 'file-1');
-  assert.deepEqual(puts, [
-    { range: 'bytes 0-262143/524288', length: 262144 },
-    { range: 'bytes 262144-524287/524288', length: 262144 },
-  ]);
+  assert.equal(puts.length, 3);
+  assert.deepEqual(puts[0], { range: 'bytes 0-8388607/18874368', length: 8388608 });
+  assert.deepEqual(puts.at(-1), { range: 'bytes 16777216-18874367/18874368', length: 2097152 });
   assert.equal(sessions.size, 0);
   assert.deepEqual(storedSessionKeys, ['google-drive-upload:project-1:file-1']);
 });
@@ -195,8 +221,8 @@ test('uploads an empty file and validates the returned stable file identity', as
     tokens: { accessToken: async () => 'access-token' },
     sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
     fetch: async (input, init) => {
-      if (String(input).includes('uploadType=resumable')) return new Response(null, { status: 200, headers: { location: 'https://upload.example/empty' } });
-      assert.equal(init.headers['content-range'], 'bytes */0');
+      assert.match(String(input), /uploadType=multipart/);
+      assert.match(init.headers['content-type'], /^multipart\/related/);
       return new Response(JSON.stringify({ id: 'file-1', name: 'empty', mimeType: 'application/octet-stream', parents: ['parent'], appProperties: {}, size: '0' }), { status: 200 });
     },
   });

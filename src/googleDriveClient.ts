@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { open, readFile, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
@@ -26,7 +26,8 @@ const driveApi = 'https://www.googleapis.com/drive/v3';
 const driveUploadApi = 'https://www.googleapis.com/upload/drive/v3';
 const folderMimeType = 'application/vnd.google-apps.folder';
 const itemFields = 'id,name,mimeType,parents,appProperties,createdTime,size,trashed';
-const chunkSize = 256 * 1024;
+const chunkSize = 8 * 1024 * 1024;
+const multipartLimit = 5 * 1024 * 1024;
 const metadataLimit = 1024 * 1024;
 
 function escapeQuery(value: string): string {
@@ -177,7 +178,45 @@ export class GoogleDriveClient implements GoogleDriveApi {
   }
 
   async uploadFile(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, source: string | Buffer, signal?: AbortSignal): Promise<GoogleDriveItem> {
+    const size = Buffer.isBuffer(source) ? source.length : (await stat(source)).size;
+    if (size <= multipartLimit && !await this.options.sessions.get(sessionKey(item))) {
+      return this.uploadMultipart(item, Buffer.isBuffer(source) ? source : await readFile(source), signal);
+    }
     return this.uploadFileAttempt(item, source, signal, false);
+  }
+
+  private async uploadMultipart(
+    item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> },
+    content: Buffer,
+    signal?: AbortSignal,
+  ): Promise<GoogleDriveItem> {
+    const boundary = `solosync-${randomUUID()}`;
+    const prefix = Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(item)}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`);
+    const body = Buffer.concat([prefix, content, Buffer.from(`\r\n--${boundary}--\r\n`)]);
+    const matches = (existing: GoogleDriveItem | undefined): existing is GoogleDriveItem => Boolean(existing
+      && existing.id === item.id
+      && existing.name === item.name
+      && existing.size === String(content.length)
+      && item.parents.length === existing.parents.length
+      && item.parents.every((parent) => existing.parents.includes(parent))
+      && Object.entries(item.appProperties).every(([key, value]) => existing.appProperties[key] === value));
+    let result: GoogleDriveItem;
+    try {
+      const response = await this.request(`${driveUploadApi}/files?uploadType=multipart&fields=${encodeURIComponent(itemFields)}`, {
+        method: 'POST',
+        headers: { 'content-type': `multipart/related; boundary=${boundary}`, 'content-length': String(body.length) },
+        body,
+        signal,
+      });
+      result = await response.json() as GoogleDriveItem;
+    } catch (error) {
+      const existing = await this.get(item.id, signal).catch(() => undefined);
+      if (!matches(existing)) throw error;
+      result = existing;
+    }
+    if (!matches(result)) throw new Error('Google Drive returned a different file after upload.');
+    await this.options.sessions.delete(sessionKey(item));
+    return result;
   }
 
   private async uploadFileAttempt(

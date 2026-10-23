@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.10` fixes hosted Google token exchange on Cloudflare Workers and verifies the complete deployed callback/exchange path during release.
+- Current stage: Version `0.0.11` changes new backups to incremental content-addressed snapshots, adds phase timing logs, and bounds the small Google Drive snapshot request path while retaining old snapshot restore compatibility.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -30,8 +30,10 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Snapshot scanning and copying accept cancellation and report progress. Cancellation or failure removes only the staging directory created by that run and never publishes it as a snapshot.
 - Native QNAP backups stage files locally, upload into a remote staging directory, read every file back for SHA-256 verification, then publish with WebDAV MOVE. Discovery and restore work without the original project folder.
 - Native Google Drive uses `drive.file`, resumable direct uploads, and PKCE. Desktop VS Code uses a loopback callback; browser-hosted VS Code uses the HTTPS broker at `solosync.szlk.uk`, which returns an encrypted opaque credential and never proxies backup contents.
+- New format-2 snapshots store one verified object per distinct SHA-256 under the project and keep only the complete manifest in each snapshot folder. Unchanged snapshots upload only a manifest; corrupt existing objects are replaced with verified content before publication, and format-1 full-copy snapshots remain readable and restorable.
+- Google Drive connections and resolved paths are cached for the extension session, small files use one multipart request, larger files use 8 MiB resumable chunks, and successful backup completion updates the in-memory history instead of rereading every historical manifest.
 - The same Cloudflare Worker serves the public SoloSync home page at `/`, privacy policy at `/privacy`, terms at `/terms`, PNG application logo at `/icon.png`, and OAuth callback at `/oauth/google/callback`.
-- Client-side encryption, retention, and incremental content-addressed storage remain later milestones documented in `docs/product-design.md`.
+- Client-side encryption and retention remain later milestones documented in `docs/product-design.md`.
 
 ## Verification
 
