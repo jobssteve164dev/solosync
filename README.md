@@ -71,7 +71,7 @@ SoloSync supports:
 
 SoloSync requests only `drive.file`, so it can manage files it creates without receiving access to the rest of your Drive. The authorization service handles the fixed HTTPS callback needed by browser and remote environments; backup file contents still transfer directly between the extension and Google Drive and are not sent through that service. Disconnecting keeps existing backups. Revoking access also keeps backups but requires every installation using that Google authorization to sign in again.
 
-The public [SoloSync home page](https://solosync.szlk.uk/), [privacy policy](https://solosync.szlk.uk/privacy), and [terms of service](https://solosync.szlk.uk/terms) describe the same Google data path and readable-backup boundary shown in the extension.
+The public [SoloSync home page](https://solosync.szlk.uk/), [privacy policy](https://solosync.szlk.uk/privacy), and [terms of service](https://solosync.szlk.uk/terms) describe the same Google data path and readable-backup boundary shown in the extension. The official square [application logo](https://solosync.szlk.uk/icon.png) is available as a PNG for the Google OAuth consent screen.
 
 ### Connect QNAP NAS
 

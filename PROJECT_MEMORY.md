@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.8` adds the dedicated public home, privacy, and terms pages required for the production Google connection.
+- Current stage: Version `0.0.9` strengthens the public home and privacy disclosures for Google verification and publishes the official PNG application logo.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -30,7 +30,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Snapshot scanning and copying accept cancellation and report progress. Cancellation or failure removes only the staging directory created by that run and never publishes it as a snapshot.
 - Native QNAP backups stage files locally, upload into a remote staging directory, read every file back for SHA-256 verification, then publish with WebDAV MOVE. Discovery and restore work without the original project folder.
 - Native Google Drive uses `drive.file`, resumable direct uploads, and PKCE. Desktop VS Code uses a loopback callback; browser-hosted VS Code uses the HTTPS broker at `solosync.szlk.uk`, which returns an encrypted opaque credential and never proxies backup contents.
-- The same Cloudflare Worker serves the public SoloSync home page at `/`, privacy policy at `/privacy`, terms at `/terms`, and OAuth callback at `/oauth/google/callback`.
+- The same Cloudflare Worker serves the public SoloSync home page at `/`, privacy policy at `/privacy`, terms at `/terms`, PNG application logo at `/icon.png`, and OAuth callback at `/oauth/google/callback`.
 - Client-side encryption, retention, and incremental content-addressed storage remain later milestones documented in `docs/product-design.md`.
 
 ## Verification

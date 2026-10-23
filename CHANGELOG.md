@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.9
+
+- Make the public home page explicitly identify SoloSync as a VS Code backup and restore extension, explain why Google sign-in is optional, and confirm that the site is viewable without signing in.
+- Expand the privacy policy with complete data collection, use, infrastructure processing, retention, deletion, AI-use, and prohibited-content boundaries for Google verification.
+- Publish the official square PNG application logo at `https://solosync.szlk.uk/icon.png` for the Google OAuth consent screen.
+
 ## 0.0.8
 
 - Publish a dedicated SoloSync home page, privacy policy, and terms of service at `solosync.szlk.uk`.

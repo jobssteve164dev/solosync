@@ -11,6 +11,7 @@ test('runs a lockfile-pinned Wrangler during release', () => {
   assert.match(packageJson.devDependencies.wrangler, /^\d+\.\d+\.\d+$/);
   assert.match(workflow, /npx --no-install wrangler deploy/);
   assert.doesNotMatch(workflow, /wrangler@/);
+  assert.equal(packageJson.displayName, 'SoloSync');
 });
 
 test('waits for the deployed authorization service to become reachable', () => {
@@ -18,6 +19,7 @@ test('waits for the deployed authorization service to become reachable', () => {
   assert.match(workflow, /for \(let attempt = 0; attempt < 6; attempt \+= 1\)/);
   assert.match(workflow, /if \(attempt < 5\) await delay\(5_000\)/);
   assert.match(workflow, /onlyEdgeBlocks &&= error\.edgeBlocked === true/);
+  assert.match(workflow, /236059fa43462ebb1271220cf363cc3836ca0be12699ad36cc7be7557f8f87cb/);
 });
 
 const script = path.resolve(__dirname, '../scripts/release-plan.mjs');

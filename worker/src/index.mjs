@@ -239,7 +239,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: json({}).headers });
     const url = new URL(request.url);
     try {
-      const siteResponse = publicSiteResponse(request, url.pathname);
+      const siteResponse = await publicSiteResponse(request, url.pathname, env);
       if (siteResponse) return siteResponse;
       if (request.method === 'GET' && url.pathname === '/health') {
         requireOAuthConfiguration(env);

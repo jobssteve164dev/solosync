@@ -13,6 +13,14 @@ function environment() {
     GOOGLE_WEB_CLIENT_SECRET: 'server-only-secret',
     OAUTH_SEALING_KEY: randomBytes(32).toString('base64'),
     PUBLIC_ORIGIN: 'https://solosync.szlk.uk',
+    ASSETS: {
+      async fetch(request) {
+        if (new URL(request.url).pathname !== '/icon.png') return new Response('Not found', { status: 404 });
+        return new Response(await readFile(new URL('../../resources/icon.png', import.meta.url)), {
+          headers: { 'content-type': 'image/png' },
+        });
+      },
+    },
   };
 }
 
@@ -46,9 +54,15 @@ test('serves the public SoloSync site and Google-ready legal pages', async () =>
   assert.match(home, /Back up what Git hasn.t protected yet/i);
   assert.match(home, /href="\/privacy"/);
   assert.match(home, /href="\/terms"/);
+  assert.match(home, /href="\/icon\.png"/);
   assert.match(home, /Full snapshots restore into a new folder/);
   assert.match(home, /individual files go to the save location you choose/);
   assert.match(home, /A full restore never targets your current folder/);
+  assert.match(home, /SoloSync is a VS Code extension for backing up and restoring project folders/);
+  assert.match(home, /You do not need to sign in to view this website or learn how SoloSync works/);
+  assert.match(home, /SoloSync requests sign-in only after you choose Google Drive in the extension/);
+  assert.match(home, /Google sign-in is requested only when you choose Google Drive/);
+  assert.match(home, /does not generate, edit, host, publish, or distribute AI-generated content or non-consensual intimate imagery/);
 
   const privacy = await pages[1].text();
   assert.match(privacy, /Google Drive/i);
@@ -57,9 +71,20 @@ test('serves the public SoloSync site and Google-ready legal pages', async () =>
   assert.match(privacy, /Google API Services User Data Policy/i);
   assert.match(privacy, /Limited Use/i);
   assert.match(privacy, /complete sign-in, refresh access, and revoke the connection/i);
-  assert.match(privacy, /does not persist those credentials in a database/i);
+  assert.match(privacy, /does not retain a server-side database copy of OAuth credentials/i);
   assert.match(privacy, /Desktop VS Code stores the Google refresh token in VS Code Secret Storage/i);
   assert.match(privacy, /Browser-hosted and remote VS Code store only the encrypted opaque credential/i);
+  assert.match(privacy, /standard network request data such as IP address, user agent, requested URL, and request time/i);
+  assert.match(privacy, /does not use Google user data to train or improve generalized artificial intelligence or machine learning models/i);
+  assert.match(privacy, /does not generate, edit, host, publish, or distribute AI-generated content or non-consensual intimate imagery/i);
+  assert.match(privacy, /Google Drive backup files remain until you delete them/i);
+  assert.match(privacy, /one-time authorization state and callback codes expire after 10 minutes/i);
+  assert.match(privacy, /saved connection remains in VS Code Secret Storage until you disconnect it/i);
+  assert.match(privacy, /Access tokens remain in memory only until they expire or the extension session ends/i);
+  assert.match(privacy, /permission-restricted local frozen copy of the project files and snapshot manifest/i);
+  assert.match(privacy, /retained after an interrupted upload until you resume or abandon that pending backup/i);
+  assert.match(privacy, /pseudonymous account-to-root mapping/i);
+  assert.match(privacy, /survives disconnect and revocation/i);
 
   const terms = await pages[2].text();
   assert.match(terms, /Terms of Service/i);
@@ -71,6 +96,14 @@ test('serves the official icon and crawl instructions from the public origin', a
   assert.equal(icon.status, 200);
   assert.equal(icon.headers.get('content-type'), 'image/svg+xml; charset=utf-8');
   assert.match(await icon.text(), /<svg/);
+
+  const uploadLogo = await worker.fetch(new Request('https://solosync.szlk.uk/icon.png'), environment());
+  assert.equal(uploadLogo.status, 200);
+  assert.equal(uploadLogo.headers.get('content-type'), 'image/png');
+  assert.equal(uploadLogo.headers.get('content-disposition'), 'inline; filename="solosync-icon.png"');
+  const uploadLogoBytes = Buffer.from(await uploadLogo.arrayBuffer());
+  assert.equal(uploadLogoBytes.length, 28_796);
+  assert.equal(createHash('sha256').update(uploadLogoBytes).digest('hex'), '236059fa43462ebb1271220cf363cc3836ca0be12699ad36cc7be7557f8f87cb');
 
   const robots = await worker.fetch(new Request('https://solosync.szlk.uk/robots.txt'), environment());
   assert.equal(robots.status, 200);
