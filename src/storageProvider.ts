@@ -1,7 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { access, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { WebDAVClient, WebDAVClientError } from 'webdav' with { 'resolution-mode': 'import' };
 
 export interface StorageEntry {
@@ -19,6 +19,7 @@ export interface StorageProvider {
   createDirectory(key: string, signal?: AbortSignal): Promise<void>;
   writeFile(key: string, source: string | Buffer, signal?: AbortSignal): Promise<void>;
   readFile(key: string, signal?: AbortSignal): Promise<Buffer>;
+  hashFile(key: string, signal?: AbortSignal): Promise<string>;
   downloadFile(key: string, destination: string, signal?: AbortSignal): Promise<void>;
   move(source: string, destination: string, signal?: AbortSignal): Promise<void>;
   delete(key: string, signal?: AbortSignal): Promise<void>;
@@ -148,6 +149,22 @@ export class LocalFileSystemProvider implements StorageProvider {
   async readFile(key: string, signal?: AbortSignal): Promise<Buffer> {
     throwIfCancelled(signal);
     return readFile(localPath(this.localRoot, key));
+  }
+
+  async hashFile(key: string, signal?: AbortSignal): Promise<string> {
+    throwIfCancelled(signal);
+    const hash = createHash('sha256');
+    const stream = createReadStream(localPath(this.localRoot, key));
+    const cancel = (): void => {
+      stream.destroy(new Error('The operation was canceled.'));
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      for await (const chunk of stream) hash.update(chunk as Buffer);
+      return hash.digest('hex');
+    } finally {
+      signal?.removeEventListener('abort', cancel);
+    }
   }
 
   async downloadFile(key: string, destination: string, signal?: AbortSignal): Promise<void> {
@@ -318,6 +335,15 @@ export class QnapWebDavProvider implements StorageProvider {
 
   async readFile(key: string, signal?: AbortSignal): Promise<Buffer> {
     return asBuffer(await this.request(() => this.client.getFileContents(webDavPath(key), { format: 'binary', signal }), signal));
+  }
+
+  async hashFile(key: string, signal?: AbortSignal): Promise<string> {
+    return this.request(async () => {
+      const hash = createHash('sha256');
+      const stream = this.client.createReadStream(webDavPath(key), { signal });
+      for await (const chunk of stream) hash.update(chunk as Buffer);
+      return hash.digest('hex');
+    }, signal);
   }
 
   async downloadFile(key: string, destination: string, signal?: AbortSignal): Promise<void> {

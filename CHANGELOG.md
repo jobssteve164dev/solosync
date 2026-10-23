@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.7
+
+- Connect Google Drive directly with browser-based Google sign-in and the least-privilege `drive.file` permission; no local sync folder is required.
+- Support local VS Code, Remote SSH, Dev Containers, Coder, and code-server through one Google Drive connection experience.
+- Upload backups directly to Google Drive with resumable 256 KiB chunks, saved upload sessions, server-confirmed resume offsets, and streamed SHA-256 verification.
+- Keep Google credentials in VS Code secure storage; the hosted callback returns an opaque credential and never proxies backup contents.
+- Detect common secret-bearing files before cloud backup, recommend excluding them, remember exact per-project choices, and allow those choices to be cleared.
+- Automatically create and use a visible `SoloSync Backups` folder while keeping incomplete snapshots out of backup history.
+- Resume an interrupted backup from its protected local copy, expose its actual disk use, and let the user continue or safely abandon it.
+- Preserve the same Drive folder after it is moved, request sign-in again when authorization expires, and clear unfinished upload credentials on disconnect.
+
 ## 0.0.6
 
 - Connect directly to a QNAP shared folder through its HTTPS address, with Basic or Digest authentication and credentials kept in VS Code secure storage.

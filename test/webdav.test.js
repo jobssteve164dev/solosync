@@ -318,11 +318,10 @@ test('remote verification failure never publishes a corrupt WebDAV snapshot', as
     await mkdir(workspace);
     await writeFile(path.join(workspace, 'source.txt'), 'original');
     const provider = await createProvider(server);
-    const originalReadFile = provider.readFile.bind(provider);
-    provider.readFile = async (key, signal) => {
-      const contents = await originalReadFile(key, signal);
-      return key.endsWith('/files/project/source.txt') ? Buffer.from('corrupt') : contents;
-    };
+    const originalHashFile = provider.hashFile.bind(provider);
+    provider.hashFile = async (key, signal) => key.endsWith('/files/project/source.txt')
+      ? createHash('sha256').update('corrupt').digest('hex')
+      : originalHashFile(key, signal);
     const repository = new SnapshotRepository();
     await assert.rejects(repository.create({
       provider,

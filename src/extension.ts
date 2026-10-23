@@ -1,12 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory, validateSourceDirectory } from './backupLocation';
 import { BackupSettingsOption, buildBackupSettingsOptions } from './backupSettings';
 import { isBackupWorthyGitOperation, readGitState } from './git';
+import { authorizeGoogleDesktop, clearGoogleUploadSessions, GoogleTokenManager, GoogleTokenManagerCache, HostedGoogleTokenManager } from './googleAuth';
+import { googleAuthMode, GoogleAuthMode, shouldRequestGoogleSignIn } from './googleAuthMode';
+import { GoogleDriveClient } from './googleDriveClient';
+import { GoogleDriveProvider } from './googleDriveProvider';
 import { HistoryTreeProvider, SnapshotItem } from './historyTree';
 import { projectIdFor, SnapshotCancelledError, SnapshotRepository } from './snapshotRepository';
+import { abandonPendingBackup, isCompatiblePendingDestination, readPendingBackup, withPendingBackupLock } from './pendingBackup';
+import { scanSensitiveFiles } from './sensitiveFileReview';
 import { LocalFileSystemProvider, normalizeQnapWebDavUrl, QnapWebDavConnection, QnapWebDavProvider, StorageProvider } from './storageProvider';
 import { SnapshotManifest, WorkspaceRoot } from './types';
 
@@ -14,6 +20,15 @@ const repository = new SnapshotRepository();
 const qnapConnectionKey = 'qnapWebDavConnection';
 const qnapPasswordKey = 'solosync.qnapWebDav.password';
 const projectAssociationsKey = 'projectAssociations';
+const googleDriveConnectedKey = 'googleDriveConnected';
+const googleDriveAccountKey = 'googleDriveAccount';
+const googleDriveAuthModeKey = 'googleDriveAuthMode';
+const sensitiveFileDecisionsKey = 'sensitiveFileDecisions';
+const googleDriveStableIdsKey = 'googleDriveStableIds';
+const googleDriveUploadSessionKeys = 'googleDriveUploadSessionKeys';
+const googleDesktopClientId = '336337797433-2kq8097ud0820baii6m26k53gv2pm95t.apps.googleusercontent.com';
+const googleBrokerUrl = 'https://solosync.szlk.uk';
+const googleTokenManagers = new GoogleTokenManagerCache();
 
 function sourceDirectory(): string | undefined {
   const value = config().get<string>('sourceDirectory', '').trim();
@@ -46,15 +61,156 @@ function qnapConnection(context: vscode.ExtensionContext): QnapWebDavConnection 
 }
 
 function hasConfiguredBackupLocation(context: vscode.ExtensionContext): boolean {
-  return backupLocationKind(context) === 'qnap' ? Boolean(qnapConnection(context)) : Boolean(backupDirectory());
+  const kind = backupLocationKind(context);
+  if (kind === 'qnap') return Boolean(qnapConnection(context));
+  if (kind === 'googleDrive') return context.globalState.get<boolean>(googleDriveConnectedKey, false);
+  return Boolean(backupDirectory());
 }
 
-async function configuredProvider(context: vscode.ExtensionContext): Promise<StorageProvider | undefined> {
-  if (backupLocationKind(context) === 'qnap') {
+type GoogleTokens = Pick<GoogleTokenManager, 'accessToken' | 'disconnect' | 'revoke'>;
+
+function currentGoogleAuthMode(): GoogleAuthMode {
+  return googleAuthMode({
+    uiKind: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
+    remoteName: vscode.env.remoteName,
+  });
+}
+
+function savedGoogleAuthMode(context: vscode.ExtensionContext): GoogleAuthMode {
+  const saved = context.globalState.get<string>(googleDriveAuthModeKey);
+  return saved === 'desktop' || saved === 'hosted' ? saved : currentGoogleAuthMode();
+}
+
+function googleTokens(context: vscode.ExtensionContext, mode = savedGoogleAuthMode(context)): GoogleTokens {
+  return googleTokenManagers.get(context, mode, () => {
+    const onAuthenticationRequired = () => context.globalState.update(googleDriveConnectedKey, false);
+    return mode === 'hosted'
+      ? new HostedGoogleTokenManager({ brokerUrl: googleBrokerUrl, secrets: context.secrets, onAuthenticationRequired })
+      : new GoogleTokenManager({ clientId: googleDesktopClientId, secrets: context.secrets, onAuthenticationRequired });
+  });
+}
+
+async function withGoogleUploadSessionRegistry<T>(context: vscode.ExtensionContext, operation: () => Promise<T>): Promise<T> {
+  await mkdir(context.globalStorageUri.fsPath, { recursive: true });
+  return withPendingBackupLock(path.join(context.globalStorageUri.fsPath, 'google-drive-upload-session-registry'), operation);
+}
+
+async function readGoogleUploadSessionKeys(context: vscode.ExtensionContext): Promise<string[]> {
+  try {
+    const value = JSON.parse(await readFile(path.join(context.globalStorageUri.fsPath, 'google-drive-upload-session-keys.json'), 'utf8'));
+    return Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return context.globalState.get<string[]>(googleDriveUploadSessionKeys, []);
+  }
+}
+
+async function writeGoogleUploadSessionKeys(context: vscode.ExtensionContext, keys: string[]): Promise<void> {
+  const target = path.join(context.globalStorageUri.fsPath, 'google-drive-upload-session-keys.json');
+  const temporary = `${target}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(keys)}\n`, { mode: 0o600 });
+  await rename(temporary, target);
+  await context.globalState.update(googleDriveUploadSessionKeys, keys);
+}
+
+async function clearGoogleUploadSessionRegistry(context: vscode.ExtensionContext, predicate: (key: string) => boolean): Promise<void> {
+  await withGoogleUploadSessionRegistry(context, async () => {
+    const keys = await readGoogleUploadSessionKeys(context);
+    const matching = keys.filter(predicate);
+    await clearGoogleUploadSessions(matching, context.secrets);
+    await writeGoogleUploadSessionKeys(context, keys.filter((key) => !matching.includes(key)));
+  });
+}
+
+function googleDriveClient(context: vscode.ExtensionContext, tokens = googleTokens(context)): GoogleDriveClient {
+  return new GoogleDriveClient({
+    tokens,
+    sessions: {
+      get: async (key) => context.secrets.get(`solosync.${key}`),
+      store: (key, value) => withGoogleUploadSessionRegistry(context, async () => {
+        const keys = await readGoogleUploadSessionKeys(context);
+        if (!keys.includes(key)) await writeGoogleUploadSessionKeys(context, [...keys, key]);
+        await context.secrets.store(`solosync.${key}`, value);
+      }),
+      delete: (key) => withGoogleUploadSessionRegistry(context, async () => {
+        await context.secrets.delete(`solosync.${key}`);
+        const keys = await readGoogleUploadSessionKeys(context);
+        await writeGoogleUploadSessionKeys(context, keys.filter((item) => item !== key));
+      }),
+    },
+  });
+}
+
+function googleDriveStableIds(context: vscode.ExtensionContext) {
+  return {
+    get: async (key: string) => context.globalState.get<Record<string, string>>(googleDriveStableIdsKey, {})[key],
+    store: async (key: string, value: string) => context.globalState.update(googleDriveStableIdsKey, {
+      ...context.globalState.get<Record<string, string>>(googleDriveStableIdsKey, {}), [key]: value,
+    }),
+    delete: async (key: string) => {
+      const values = context.globalState.get<Record<string, string>>(googleDriveStableIdsKey, {});
+      delete values[key];
+      await context.globalState.update(googleDriveStableIdsKey, values);
+    },
+  };
+}
+
+async function clearGooglePendingCredentials(context: vscode.ExtensionContext, projectId: string): Promise<void> {
+  await clearGoogleUploadSessionRegistry(context, (key) => key.startsWith(`google-drive-upload:${projectId}:`));
+  const ids = context.globalState.get<Record<string, string>>(googleDriveStableIdsKey, {});
+  for (const key of Object.keys(ids)) if (key.includes(`:${projectId}:`)) delete ids[key];
+  await context.globalState.update(googleDriveStableIdsKey, ids);
+}
+
+interface SensitiveFileDecision {
+  excluded: string[];
+  included: string[];
+}
+
+async function reviewSensitiveFiles(
+  context: vscode.ExtensionContext,
+  projectId: string,
+  roots: WorkspaceRoot[],
+  excludes: string[],
+  signal?: AbortSignal,
+): Promise<SensitiveFileDecision | undefined> {
+  const found = await scanSensitiveFiles(roots, excludes, signal);
+  const allDecisions = context.globalState.get<Record<string, SensitiveFileDecision>>(sensitiveFileDecisionsKey, {});
+  const saved = allDecisions[projectId] ?? { excluded: [], included: [] };
+  const decided = new Set([...saved.excluded, ...saved.included]);
+  const undecided = found.filter((file) => !decided.has(file.key));
+  if (undecided.length > 0) {
+    const shown = undecided.slice(0, 12).map((file) => file.key);
+    const more = undecided.length > shown.length ? `\n…and ${undecided.length - shown.length} more` : '';
+    const choice = await vscode.window.showWarningMessage(
+      `SoloSync found ${undecided.length} file${undecided.length === 1 ? '' : 's'} that may contain secrets.`,
+      { modal: true, detail: `${shown.join('\n')}${more}\n\nGoogle Drive stores readable backup files.` },
+      'Exclude These Files',
+      'Always Include',
+    );
+    if (!choice) return undefined;
+    const additions = undecided.map((file) => file.key);
+    const next = choice === 'Exclude These Files'
+      ? { excluded: [...new Set([...saved.excluded, ...additions])], included: saved.included }
+      : { excluded: saved.excluded, included: [...new Set([...saved.included, ...additions])] };
+    allDecisions[projectId] = next;
+    await context.globalState.update(sensitiveFileDecisionsKey, allDecisions);
+    return next;
+  }
+  return saved;
+}
+
+async function configuredProvider(context: vscode.ExtensionContext, signal?: AbortSignal): Promise<StorageProvider | undefined> {
+  const kind = backupLocationKind(context);
+  if (kind === 'qnap') {
     const connection = qnapConnection(context);
     const password = await context.secrets.get(qnapPasswordKey);
     if (!connection || !password) return undefined;
     return QnapWebDavProvider.create(connection, password);
+  }
+  if (kind === 'googleDrive') {
+    if (!context.globalState.get<boolean>(googleDriveConnectedKey, false)) return undefined;
+    return GoogleDriveProvider.connect(googleDriveClient(context), googleDriveStableIds(context), signal);
   }
   const directory = backupDirectory();
   return directory ? new LocalFileSystemProvider(directory) : undefined;
@@ -82,11 +238,11 @@ async function resolveProjectId(context: vscode.ExtensionContext, provider: Stor
   return projectId;
 }
 
-async function validateProvider(provider: StorageProvider, roots: WorkspaceRoot[]): Promise<void> {
+async function validateProvider(provider: StorageProvider, roots: WorkspaceRoot[], signal?: AbortSignal): Promise<void> {
   if (provider.localRoot) {
     await validateBackupDirectory(provider.localRoot, roots);
   } else {
-    await provider.validate();
+    await provider.validate(signal);
   }
 }
 
@@ -188,47 +344,101 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         roots = protectedRoots();
       }
       let provider: StorageProvider | undefined;
+      const connectionController = new AbortController();
+      let connectionReady = false;
+      activeBackupController = connectionController;
+      status.text = '$(sync~spin) SoloSync: Connecting';
+      status.command = 'solosync.cancelBackup';
+      status.tooltip = 'Click to cancel this backup';
+      await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', true);
       try {
-        provider = await configuredProvider(context);
-        if (!provider) provider = await chooseBackupLocation(context, roots);
+        provider = await configuredProvider(context, connectionController.signal);
+        if (!provider) {
+          if (backupLocationKind(context) === 'googleDrive') {
+            if (!shouldRequestGoogleSignIn(reason)) return undefined;
+            provider = await configureGoogleDrive(context, connectionController.signal);
+          } else {
+            provider = await chooseBackupLocation(context, roots);
+          }
+        }
         if (!provider) return undefined;
-        await validateProvider(provider, roots);
+        await validateProvider(provider, roots, connectionController.signal);
+        connectionReady = true;
       } catch (error) {
+        if (connectionController.signal.aborted) {
+          status.text = '$(circle-slash) SoloSync: Backup canceled';
+          status.tooltip = 'No snapshot was created';
+          void vscode.window.showInformationMessage('SoloSync backup canceled. No snapshot was created.');
+          return undefined;
+        }
         const message = error instanceof Error ? error.message : String(error);
         void vscode.window.showErrorMessage(message, 'Set Backup Location').then((action) => {
           if (action === 'Set Backup Location') void vscode.commands.executeCommand('solosync.configure');
         });
         return undefined;
+      } finally {
+        if (!connectionReady) {
+          activeBackupController = undefined;
+          status.command = 'solosync.backupNow';
+          await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', false);
+        }
       }
       if (!provider) return undefined;
       if (!vscode.workspace.isTrusted) {
+        activeBackupController = undefined;
+        status.command = 'solosync.backupNow';
+        await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', false);
         void vscode.window.showWarningMessage('Trust this workspace before creating a SoloSync backup.');
         return undefined;
       }
 
       status.text = '$(sync~spin) SoloSync: Backing up';
       try {
-        const git = await readGitState(roots);
         const projectId = await resolveProjectId(context, provider, roots);
+        const pendingDirectory = backupLocationKind(context) === 'googleDrive'
+          ? path.join(context.globalStorageUri.fsPath, 'pending', projectId)
+          : undefined;
+        const resuming = pendingDirectory
+          ? await stat(path.join(pendingDirectory, 'manifest.json')).then(() => true, () => false)
+          : false;
+        const git = resuming ? { dirty: true } : await readGitState(roots);
+        const exclusions = config().get<string[]>('exclude', []);
+        let sensitiveDecision: SensitiveFileDecision | undefined;
+        try {
+          sensitiveDecision = backupLocationKind(context) === 'googleDrive' && !resuming
+            ? await reviewSensitiveFiles(context, projectId, roots, exclusions, connectionController.signal)
+            : undefined;
+        } catch (error) {
+          if (connectionController.signal.aborted) throw new SnapshotCancelledError();
+          throw error;
+        }
+        if (backupLocationKind(context) === 'googleDrive' && !resuming && !sensitiveDecision) {
+          await refresh();
+          return undefined;
+        }
         const manifest = await vscode.window.withProgress({
           location: vscode.ProgressLocation.Notification,
           title: `SoloSync is protecting ${projectName(roots)}`,
           cancellable: true,
         }, async (progress, token) => {
-          const controller = new AbortController();
-          activeBackupController = controller;
+          const controller = connectionController;
           status.command = 'solosync.cancelBackup';
           status.tooltip = 'Click to cancel this backup';
           await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', true);
           const cancellation = token.onCancellationRequested(() => controller.abort());
           let lastCompleted = 0;
           try {
-            return await repository.create({
+            const createSnapshot = () => repository.create({
               provider,
               projectId,
               projectName: projectName(roots),
               roots,
-              excludes: config().get<string[]>('exclude', []),
+              excludes: exclusions,
+              excludedSensitivePaths: sensitiveDecision?.excluded ?? [],
+              reviewedSensitivePaths: sensitiveDecision ? [...sensitiveDecision.excluded, ...sensitiveDecision.included] : undefined,
+              pendingDirectory,
+              pendingDestinationIdentity: provider instanceof GoogleDriveProvider ? provider.destinationIdentity : undefined,
+              discardPendingCredentials: pendingDirectory ? () => clearGooglePendingCredentials(context, projectId) : undefined,
               reason,
               git,
               signal: controller.signal,
@@ -244,11 +454,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 }
               },
             });
+            return pendingDirectory
+              ? withPendingBackupLock(pendingDirectory, createSnapshot)
+              : createSnapshot();
           } finally {
             cancellation.dispose();
-            activeBackupController = undefined;
-            status.command = 'solosync.backupNow';
-            await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', false);
           }
         });
         await context.workspaceState.update('lastObservedHead', git.head);
@@ -266,9 +476,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return undefined;
         }
         status.text = '$(error) SoloSync: Backup failed';
+        status.tooltip = 'Backup failed. Click to try again.';
         const message = error instanceof Error ? error.message : String(error);
         void vscode.window.showErrorMessage(`SoloSync could not create the backup: ${message}`);
         return undefined;
+      } finally {
+        activeBackupController = undefined;
+        status.command = 'solosync.backupNow';
+        await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', false);
       }
     })();
     try {
@@ -279,7 +494,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const scheduleIdleBackup = (changed?: vscode.Uri): void => {
-    const directory = backupLocationKind(context) === 'qnap' ? undefined : backupDirectory();
+    const kind = backupLocationKind(context);
+    const directory = kind === 'qnap' || kind === 'googleDrive' ? undefined : backupDirectory();
     if (changed?.scheme === 'file' && directory && isPathInsideDirectory(changed.fsPath, directory)) return;
     const roots = protectedRoots();
     if (changed?.scheme === 'file' && !roots.some((root) => isPathInsideDirectory(changed.fsPath, root.path))) return;
@@ -342,6 +558,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (action === 'Browse Backups') await browseBackups(context);
     }),
     vscode.commands.registerCommand('solosync.openSettings', () => openBackupSettings(context, refresh)),
+    vscode.commands.registerCommand('solosync.connectGoogleDrive', async () => {
+      if (await configureGoogleDrive(context)) await refresh();
+    }),
+    vscode.commands.registerCommand('solosync.disconnectGoogleDrive', async () => {
+      await disconnectGoogleDrive(context, false);
+      await refresh();
+    }),
+    vscode.commands.registerCommand('solosync.revokeGoogleDrive', async () => {
+      await disconnectGoogleDrive(context, true);
+      await refresh();
+    }),
     vscode.commands.registerCommand('solosync.backupNow', () => backup('Manual backup')),
     vscode.commands.registerCommand('solosync.cancelBackup', () => activeBackupController?.abort()),
     vscode.commands.registerCommand('solosync.refresh', refresh),
@@ -369,6 +596,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   await vscode.commands.executeCommand('setContext', 'solosync.backupRunning', false);
   await refresh();
+  if (backupLocationKind(context) === 'googleDrive' && context.globalState.get<boolean>(googleDriveConnectedKey, false)) {
+    const root = protectedRoots()[0];
+    const associations = context.globalState.get<Record<string, string>>(projectAssociationsKey, {});
+    const projectId = root ? associations[associationPath(root.path)] : undefined;
+    if (projectId) {
+      const pendingManifest = path.join(context.globalStorageUri.fsPath, 'pending', projectId, 'manifest.json');
+      if (await stat(pendingManifest).then(() => true, () => false)) setTimeout(() => void backup('Resume interrupted backup'), 0);
+    }
+  }
 }
 
 async function chooseSourceDirectory(): Promise<string | undefined> {
@@ -411,9 +647,8 @@ async function chooseBackupLocation(context: vscode.ExtensionContext, roots: Wor
     {
       locationKind: 'googleDrive',
       label: '$(cloud) Google Drive',
-      description: 'Desktop sync folder',
-      detail: 'Choose a folder already synced by Google Drive for desktop.',
-      pickerTitle: 'Choose a folder synced by Google Drive for desktop',
+      description: 'Sign in with Google',
+      detail: 'SoloSync creates and uses a dedicated SoloSync Backups folder.',
     },
     {
       locationKind: 'nas',
@@ -437,6 +672,7 @@ async function chooseBackupLocation(context: vscode.ExtensionContext, roots: Wor
   });
   if (!option) return undefined;
   if (option.locationKind === 'qnap') return configureQnap(context);
+  if (option.locationKind === 'googleDrive') return configureGoogleDrive(context);
   const currentDirectory = backupDirectory();
   const picked = await vscode.window.showOpenDialog({
     canSelectFiles: false,
@@ -458,6 +694,92 @@ async function chooseBackupLocation(context: vscode.ExtensionContext, roots: Wor
   await context.globalState.update('backupLocationKind', option.locationKind);
   await config().update('backupDirectory', selected, vscode.ConfigurationTarget.Global);
   return new LocalFileSystemProvider(selected);
+}
+
+async function configureGoogleDrive(context: vscode.ExtensionContext, signal?: AbortSignal): Promise<StorageProvider | undefined> {
+  const mode = currentGoogleAuthMode();
+  try {
+    let tokens: GoogleTokens;
+    if (mode === 'hosted') {
+      const hosted = googleTokens(context, mode) as HostedGoogleTokenManager;
+      await hosted.connect({
+        openExternal: (url) => vscode.env.openExternal(vscode.Uri.parse(url)),
+        requestCallbackCode: async () => {
+          const cancellation = new vscode.CancellationTokenSource();
+          const cancel = (): void => cancellation.cancel();
+          if (signal?.aborted) cancellation.cancel();
+          else signal?.addEventListener('abort', cancel, { once: true });
+          try {
+            return await vscode.window.showInputBox({
+              title: 'Connect Google Drive',
+              prompt: 'Paste the one-time code shown after Google approves access.',
+              placeHolder: 'Paste the SoloSync connection code',
+              ignoreFocusOut: true,
+              validateInput: (value) => value.trim() ? undefined : 'Paste the connection code from the browser.',
+            }, cancellation.token);
+          } finally {
+            signal?.removeEventListener('abort', cancel);
+            cancellation.dispose();
+          }
+        },
+      }, signal);
+      tokens = hosted;
+    } else {
+      const desktop = googleTokens(context, mode) as GoogleTokenManager;
+      await authorizeGoogleDesktop({
+        clientId: googleDesktopClientId,
+        tokens: desktop,
+        openExternal: (url) => vscode.env.openExternal(vscode.Uri.parse(url)),
+        signal,
+      });
+      tokens = desktop;
+    }
+    const provider = await GoogleDriveProvider.connect(googleDriveClient(context, tokens), googleDriveStableIds(context), signal);
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'SoloSync is checking Google Drive',
+      cancellable: false,
+    }, () => provider.testConnection(signal));
+    await context.globalState.update(googleDriveAuthModeKey, mode);
+    await context.globalState.update(googleDriveAccountKey, provider.account.emailAddress ?? provider.account.displayName ?? 'Google account');
+    await context.globalState.update(googleDriveConnectedKey, true);
+    await context.globalState.update('backupLocationKind', 'googleDrive');
+    return provider;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not connect to Google Drive: ${message}`);
+    return undefined;
+  }
+}
+
+async function disconnectGoogleDrive(context: vscode.ExtensionContext, revoke: boolean): Promise<void> {
+  if (revoke) {
+    const confirmation = await vscode.window.showWarningMessage(
+      'Revoke SoloSync access to Google Drive? Existing backups will stay in Google Drive, but every SoloSync installation using this authorization may need to sign in again.',
+      { modal: true },
+      'Revoke Access',
+    );
+    if (confirmation !== 'Revoke Access') return;
+  }
+  const mode = savedGoogleAuthMode(context);
+  try {
+    const tokens = googleTokens(context, mode);
+    if (revoke) await tokens.revoke();
+    else await tokens.disconnect();
+    await clearGoogleUploadSessionRegistry(context, () => true);
+    const stableIds = context.globalState.get<Record<string, string>>(googleDriveStableIdsKey, {});
+    await context.globalState.update(googleDriveStableIdsKey, Object.fromEntries(
+      Object.entries(stableIds).filter(([key]) => key.startsWith('google-drive-root-id:')),
+    ));
+    await context.globalState.update(googleDriveConnectedKey, false);
+    await context.globalState.update(googleDriveAccountKey, undefined);
+    if (backupLocationKind(context) === 'googleDrive') await context.globalState.update('backupLocationKind', undefined);
+    void vscode.window.showInformationMessage(revoke ? 'Google Drive access was revoked. Your existing backups were not deleted.' : 'Google Drive was disconnected. Your existing backups were not deleted.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`SoloSync could not ${revoke ? 'revoke' : 'disconnect'} Google Drive: ${message}`);
+  }
 }
 
 async function configureQnap(context: vscode.ExtensionContext): Promise<StorageProvider | undefined> {
@@ -526,10 +848,12 @@ function backupLocationKind(context: vscode.ExtensionContext): BackupLocationKin
 }
 
 function backupLocationDescription(context: vscode.ExtensionContext): string {
-  if (backupLocationKind(context) === 'qnap') {
+  const kind = backupLocationKind(context);
+  if (kind === 'qnap') {
     const connection = qnapConnection(context);
     return connection ? new URL(connection.baseUrl).hostname : 'Not connected';
   }
+  if (kind === 'googleDrive') return context.globalState.get<string>(googleDriveAccountKey, 'Google Drive');
   const directory = backupDirectory();
   return directory ? path.basename(directory) || directory : 'Not selected';
 }
@@ -538,16 +862,31 @@ async function openBackupSettings(context: vscode.ExtensionContext, refresh: () 
   const kind = backupLocationKind(context);
   const connection = kind === 'qnap' ? qnapConnection(context) : undefined;
   const hasQnapPassword = connection ? Boolean(await context.secrets.get(qnapPasswordKey)) : false;
-  const destination = connection?.baseUrl ?? backupDirectory();
+  const destination = kind === 'googleDrive' ? 'SoloSync Backups' : connection?.baseUrl ?? backupDirectory();
+  const roots = protectedRoots();
+  const associations = context.globalState.get<Record<string, string>>(projectAssociationsKey, {});
+  const currentProjectId = roots[0] ? associations[associationPath(roots[0].path)] : undefined;
+  const sensitiveDecisions = context.globalState.get<Record<string, SensitiveFileDecision>>(sensitiveFileDecisionsKey, {});
+  const currentSensitiveDecision = currentProjectId ? sensitiveDecisions[currentProjectId] : undefined;
+  const pendingDirectory = currentProjectId ? path.join(context.globalStorageUri.fsPath, 'pending', currentProjectId) : undefined;
+  const pendingBackup = pendingDirectory ? await readPendingBackup(pendingDirectory).catch(() => undefined) : undefined;
   const options = buildBackupSettingsOptions({
     kind,
     kindLabel: kind ? backupLocationLabels[kind] : undefined,
     destination,
     qnapUsername: connection?.username,
+    googleAccount: context.globalState.get<string>(googleDriveAccountKey),
+    googleConnected: context.globalState.get<boolean>(googleDriveConnectedKey, false),
     qnapPasswordSaved: hasQnapPassword,
     backupAfterCommit: config().get<boolean>('autoBackupAfterCommit', true),
     idleBackupMinutes: config().get<number>('idleBackupMinutes', 10),
     exclusionCount: config().get<string[]>('exclude', []).length,
+    sensitiveDecisionCount: (currentSensitiveDecision?.excluded.length ?? 0) + (currentSensitiveDecision?.included.length ?? 0),
+    pendingBackup: pendingBackup ? {
+      state: pendingBackup.job.state,
+      occupiedBytes: pendingBackup.occupiedBytes,
+      createdAt: pendingBackup.job.createdAt,
+    } : undefined,
   });
   const selected = await vscode.window.showQuickPick(options, {
     title: 'SoloSync Backup Settings',
@@ -567,12 +906,78 @@ async function openBackupSettings(context: vscode.ExtensionContext, refresh: () 
     void vscode.window.showInformationMessage('QNAP connection is ready.');
     return;
   }
-  const setting = {
+  if (selected.action === 'googleConnection') {
+    const connected = context.globalState.get<boolean>(googleDriveConnectedKey, false);
+    const actions = connected
+      ? [
+        { label: '$(sign-out) Disconnect', description: 'Keep backups and Google authorization', command: 'solosync.disconnectGoogleDrive' },
+        { label: '$(shield) Revoke access', description: 'Remove SoloSync authorization without deleting backups', command: 'solosync.revokeGoogleDrive' },
+      ]
+      : [{ label: '$(sign-in) Sign in again', description: 'Reconnect the SoloSync Backups folder', command: 'solosync.connectGoogleDrive' }];
+    const action = await vscode.window.showQuickPick(actions, { title: 'Google Drive connection', placeHolder: 'What would you like to do?' });
+    if (action) await vscode.commands.executeCommand(action.command);
+    return;
+  }
+  if (selected.action === 'pendingBackup' && currentProjectId && pendingDirectory && pendingBackup) {
+    const action = await vscode.window.showQuickPick([
+      { label: '$(debug-continue) Continue backup', description: 'Resume from the saved upload progress', value: 'continue' },
+      { label: '$(trash) Abandon backup', description: 'Remove this unfinished copy without deleting completed backups', value: 'abandon' },
+    ], { title: 'Pending Google Drive backup', placeHolder: 'What would you like to do?' });
+    if (action?.value === 'continue') {
+      let provider = backupLocationKind(context) === 'googleDrive' ? await configuredProvider(context) : undefined;
+      if (!(provider instanceof GoogleDriveProvider)) provider = await configureGoogleDrive(context);
+      if (!(provider instanceof GoogleDriveProvider)) return;
+      if (!pendingBackup.job.destinationIdentity || !isCompatiblePendingDestination(pendingBackup.job.destinationIdentity, provider.destinationIdentity)) {
+        void vscode.window.showErrorMessage('This pending backup belongs to a different Google account. Sign in with the account that created it.');
+        return;
+      }
+      await vscode.commands.executeCommand('solosync.backupNow');
+    } else if (action?.value === 'abandon') {
+      const confirmation = await vscode.window.showWarningMessage(
+        'Abandon this unfinished backup?',
+        { modal: true, detail: 'SoloSync will remove only this frozen local copy and its unfinished Google Drive upload. Completed backups will stay untouched.' },
+        'Abandon Backup',
+      );
+      if (confirmation === 'Abandon Backup') {
+        try {
+          let provider = backupLocationKind(context) === 'googleDrive' ? await configuredProvider(context) : undefined;
+          if (!(provider instanceof GoogleDriveProvider)) provider = await configureGoogleDrive(context);
+          if (!(provider instanceof GoogleDriveProvider)) throw new Error('Reconnect Google Drive before abandoning this pending backup.');
+          if (!pendingBackup.job.destinationIdentity || !isCompatiblePendingDestination(pendingBackup.job.destinationIdentity, provider.destinationIdentity)) {
+            throw new Error('Sign in with the Google account that created this pending backup.');
+          }
+          await withPendingBackupLock(pendingDirectory, () => abandonPendingBackup(pendingDirectory, {
+            deleteRemoteStaging: () => provider.delete(`SoloSync/${currentProjectId}/staging/${pendingBackup.job.snapshotId}`),
+            clearCredentials: () => clearGooglePendingCredentials(context, currentProjectId),
+          }));
+          void vscode.window.showInformationMessage('The unfinished backup was removed. Completed backups were not changed.');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          void vscode.window.showErrorMessage(`SoloSync could not abandon the unfinished backup: ${message}`);
+        }
+      }
+    }
+    return;
+  }
+  if (selected.action === 'sensitiveFiles' && currentProjectId) {
+    const choice = await vscode.window.showWarningMessage(
+      'Review sensitive files again before the next Google Drive backup?',
+      { modal: true, detail: 'SoloSync will forget the include and exclude choices saved for this project. No files or backups will be deleted.' },
+      'Review Again',
+    );
+    if (choice === 'Review Again') {
+      delete sensitiveDecisions[currentProjectId];
+      await context.globalState.update(sensitiveFileDecisionsKey, sensitiveDecisions);
+      void vscode.window.showInformationMessage('SoloSync will review sensitive files before the next Google Drive backup.');
+    }
+    return;
+  }
+  const setting = ({
     commitTiming: 'solosync.autoBackupAfterCommit',
     idleTiming: 'solosync.idleBackupMinutes',
     exclusions: 'solosync.exclude',
-  }[selected.action];
-  await vscode.commands.executeCommand('workbench.action.openSettings', setting);
+  } as Partial<Record<BackupSettingsOption['action'], string>>)[selected.action];
+  if (setting) await vscode.commands.executeCommand('workbench.action.openSettings', setting);
 }
 
 async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreeProvider, context: vscode.ExtensionContext, provider: StorageProvider): Promise<SnapshotManifest | undefined> {
@@ -590,7 +995,9 @@ async function pickSnapshot(item: SnapshotItem | undefined, _tree: HistoryTreePr
 
 async function browseBackups(context: vscode.ExtensionContext): Promise<void> {
   let provider = await configuredProvider(context);
-  if (!provider) provider = await chooseBackupLocation(context, []);
+  if (!provider) provider = backupLocationKind(context) === 'googleDrive'
+    ? await configureGoogleDrive(context)
+    : await chooseBackupLocation(context, []);
   if (!provider) return;
   try {
     await provider.validate();

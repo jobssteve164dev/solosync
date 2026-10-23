@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { isPathInsideDirectory } from './backupLocation';
 import { normalizeStorageKey, StorageProvider } from './storageProvider';
 import { SnapshotFile, SnapshotManifest, WorkspaceRoot } from './types';
+import { isCompatiblePendingDestination, PendingBackupJob, readPendingBackup, requirePendingCapacity, writePendingBackup } from './pendingBackup';
+import { isExcludedPath } from './exclusions';
+import { isSensitiveFileName } from './sensitiveFileReview';
 
 export interface CreateSnapshotOptions {
   provider: StorageProvider;
@@ -13,6 +16,12 @@ export interface CreateSnapshotOptions {
   projectName: string;
   roots: WorkspaceRoot[];
   excludes: string[];
+  excludedSensitivePaths?: string[];
+  reviewedSensitivePaths?: string[];
+  pendingDirectory?: string;
+  pendingAvailableBytes?: () => Promise<number>;
+  discardPendingCredentials?: () => Promise<void>;
+  pendingDestinationIdentity?: string;
   reason: string;
   git: SnapshotManifest['git'];
   signal?: AbortSignal;
@@ -47,16 +56,6 @@ function safeSegment(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+$/, 'root').slice(0, 80) || 'root';
 }
 
-function shouldExclude(relativePath: string, name: string, excludes: string[]): boolean {
-  const segments = relativePath.split(path.sep);
-  return excludes.some((rule) => {
-    if (rule.startsWith('*.')) {
-      return name.toLowerCase().endsWith(rule.slice(1).toLowerCase());
-    }
-    return name === rule || segments.includes(rule);
-  });
-}
-
 async function sha256(filePath: string, signal?: AbortSignal): Promise<string> {
   throwIfCancelled(signal);
   const hash = createHash('sha256');
@@ -81,6 +80,9 @@ async function sha256(filePath: string, signal?: AbortSignal): Promise<string> {
 
 async function collectFiles(root: WorkspaceRoot, options: CreateSnapshotOptions): Promise<Array<{ absolute: string; relative: string }>> {
   const files: Array<{ absolute: string; relative: string }> = [];
+  const sensitiveExcludes = new Set(options.excludedSensitivePaths ?? []);
+  const reviewedSensitivePaths = options.reviewedSensitivePaths ? new Set(options.reviewedSensitivePaths) : undefined;
+  const rootName = safeSegment(root.name);
   const nestedBackupDirectory = options.provider.localRoot && isPathInsideDirectory(options.provider.localRoot, root.path) ? options.provider.localRoot : undefined;
   async function walk(current: string): Promise<void> {
     throwIfCancelled(options.signal);
@@ -89,12 +91,16 @@ async function collectFiles(root: WorkspaceRoot, options: CreateSnapshotOptions)
       throwIfCancelled(options.signal);
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root.path, absolute);
-      if ((nestedBackupDirectory && isPathInsideDirectory(absolute, nestedBackupDirectory)) || shouldExclude(relative, entry.name, options.excludes) || entry.isSymbolicLink()) {
+      const sensitiveKey = `${rootName}/${relative.split(path.sep).join('/')}`;
+      if ((nestedBackupDirectory && isPathInsideDirectory(absolute, nestedBackupDirectory)) || isExcludedPath(relative, entry.name, options.excludes) || sensitiveExcludes.has(sensitiveKey) || entry.isSymbolicLink()) {
         continue;
       }
       if (entry.isDirectory()) {
         await walk(absolute);
       } else if (entry.isFile()) {
+        if (reviewedSensitivePaths && isSensitiveFileName(entry.name) && !reviewedSensitivePaths.has(sensitiveKey)) {
+          throw new Error(`SoloSync found a new sensitive file (${sensitiveKey}). Review sensitive files again before backing up to Google Drive.`);
+        }
         files.push({ absolute, relative });
         if (files.length === 1 || files.length % 100 === 0) {
           options.onProgress?.({ phase: 'scanning', discovered: files.length });
@@ -108,10 +114,6 @@ async function collectFiles(root: WorkspaceRoot, options: CreateSnapshotOptions)
 
 function storageKey(...segments: string[]): string {
   return segments.filter(Boolean).join('/');
-}
-
-function sha256Buffer(contents: Buffer): string {
-  return createHash('sha256').update(contents).digest('hex');
 }
 
 function parseManifest(contents: Buffer): SnapshotManifest {
@@ -128,27 +130,34 @@ function parseManifest(contents: Buffer): SnapshotManifest {
   return value as SnapshotManifest;
 }
 
-async function uploadDirectory(provider: StorageProvider, localDirectory: string, remoteDirectory: string, signal?: AbortSignal): Promise<void> {
+async function uploadDirectory(provider: StorageProvider, localDirectory: string, remoteDirectory: string, signal?: AbortSignal, root = true): Promise<void> {
   throwIfCancelled(signal);
   await provider.createDirectory(remoteDirectory, signal);
   const entries = await readdir(localDirectory, { withFileTypes: true });
   for (const entry of entries) {
+    if (root && (entry.name === 'job.json' || entry.name === 'job.json.tmp')) continue;
     throwIfCancelled(signal);
     const local = path.join(localDirectory, entry.name);
     const remote = storageKey(remoteDirectory, entry.name);
     if (entry.isDirectory()) {
-      await uploadDirectory(provider, local, remote, signal);
+      await uploadDirectory(provider, local, remote, signal, false);
     } else if (entry.isFile()) {
-      await provider.writeFile(remote, local, signal);
+      if (await provider.exists(remote, signal)) {
+        if (await provider.hashFile(remote, signal) !== await sha256(local, signal)) {
+          throw new Error(`The existing uploaded copy of ${entry.name} does not match this backup.`);
+        }
+      } else {
+        await provider.writeFile(remote, local, signal);
+      }
     }
   }
 }
 
-async function readProject(provider: StorageProvider, projectId: string): Promise<BackupProject | undefined> {
+async function readProject(provider: StorageProvider, projectId: string, signal?: AbortSignal): Promise<BackupProject | undefined> {
   const key = storageKey('SoloSync', projectId, 'project.json');
-  if (!(await provider.exists(key))) return undefined;
+  if (!(await provider.exists(key, signal))) return undefined;
   try {
-    const value = JSON.parse((await provider.readFile(key)).toString('utf8')) as Partial<BackupProject>;
+    const value = JSON.parse((await provider.readFile(key, signal)).toString('utf8')) as Partial<BackupProject>;
     if (value.formatVersion !== 1 || value.projectId !== projectId || typeof value.projectName !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string') return undefined;
     return value as BackupProject;
   } catch {
@@ -177,27 +186,76 @@ export function projectIdFor(roots: WorkspaceRoot[]): string {
 
 export class SnapshotRepository {
   async create(options: CreateSnapshotOptions): Promise<SnapshotManifest> {
-    const snapshotId = `${new Date().toISOString().replace(/[:.]/g, '-')}_${randomUUID().slice(0, 8)}`;
+    let resumedManifest: SnapshotManifest | undefined;
+    let resumedJob: PendingBackupJob | undefined;
+    if (options.pendingDirectory) {
+      try {
+        resumedManifest = parseManifest(await readFile(path.join(options.pendingDirectory, 'manifest.json')));
+        if (resumedManifest.projectId !== options.projectId) throw new Error('The pending backup belongs to a different project.');
+        resumedJob = (await readPendingBackup(options.pendingDirectory)).job;
+        if (options.pendingDestinationIdentity && (!resumedJob.destinationIdentity || !isCompatiblePendingDestination(resumedJob.destinationIdentity, options.pendingDestinationIdentity))) {
+          throw new Error('This pending backup belongs to a different Google Drive account. Reconnect the account that created it.');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await rm(options.pendingDirectory, { recursive: true, force: true });
+      }
+    }
+    const snapshotId = resumedManifest?.snapshotId ?? `${new Date().toISOString().replace(/[:.]/g, '-')}_${randomUUID().slice(0, 8)}`;
+    const createdAt = resumedManifest?.createdAt ?? new Date().toISOString();
     const projectDirectory = storageKey('SoloSync', options.projectId);
     const stagingDirectory = storageKey(projectDirectory, 'staging', snapshotId);
     const finalDirectory = storageKey(projectDirectory, 'snapshots', snapshotId);
-    const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'solosync-staging-'));
-    const localSnapshotDirectory = path.join(temporaryRoot, snapshotId);
-    const manifestFiles: SnapshotFile[] = [];
-    let totalBytes = 0;
+    const temporaryRoot = options.pendingDirectory ?? await mkdtemp(path.join(os.tmpdir(), 'solosync-staging-'));
+    const localSnapshotDirectory = options.pendingDirectory ?? path.join(temporaryRoot, snapshotId);
+    const manifestFiles: SnapshotFile[] = resumedManifest?.files ?? [];
+    let totalBytes = resumedManifest?.totalBytes ?? 0;
     let published = false;
+    let remoteCommitted = false;
+    let manifest = resumedManifest;
+    let frozen = Boolean(resumedManifest);
+    let discarded = false;
 
-    await mkdir(localSnapshotDirectory, { recursive: true });
+    await mkdir(localSnapshotDirectory, { recursive: true, mode: 0o700 });
     try {
+      if (resumedManifest) {
+        for (const file of resumedManifest.files) {
+          const local = path.join(localSnapshotDirectory, 'files', file.root, ...file.path.split('/'));
+          if (await sha256(local, options.signal) !== file.sha256) throw new Error(`The pending copy of ${file.path} failed verification.`);
+        }
+      } else {
+      const plannedRoots: Array<{ root: WorkspaceRoot; rootName: string; files: Array<{ absolute: string; relative: string }> }> = [];
+      let estimatedBytes = 0;
       for (const root of options.roots) {
-        throwIfCancelled(options.signal);
-        const rootName = safeSegment(root.name);
         const files = await collectFiles(root, options);
+        for (const file of files) estimatedBytes += (await stat(file.absolute)).size;
+        plannedRoots.push({ root, rootName: safeSegment(root.name), files });
+      }
+      if (options.pendingDirectory) {
+        const availableBytes = options.pendingAvailableBytes
+          ? await options.pendingAvailableBytes()
+          : await statfs(localSnapshotDirectory).then((value) => value.bavail * value.bsize);
+        requirePendingCapacity(estimatedBytes, availableBytes);
+        await writePendingBackup(options.pendingDirectory, {
+          formatVersion: 1,
+          snapshotId,
+          projectId: options.projectId,
+          projectName: options.projectName,
+          createdAt,
+          state: 'uploading',
+          totalBytes: 0,
+          destinationIdentity: options.pendingDestinationIdentity,
+        });
+      }
+      for (const { rootName, files } of plannedRoots) {
+        throwIfCancelled(options.signal);
         const progressInterval = Math.max(1, Math.floor(files.length / 100));
         for (const [index, file] of files.entries()) {
           throwIfCancelled(options.signal);
           const destination = path.join(localSnapshotDirectory, 'files', rootName, file.relative);
+          if (options.pendingDirectory) await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
           const copied = await copyConsistent(file.absolute, destination, options.signal);
+          if (options.pendingDirectory) await chmod(destination, 0o600);
           totalBytes += copied.size;
           manifestFiles.push({ root: rootName, path: file.relative.split(path.sep).join('/'), ...copied });
           const completed = index + 1;
@@ -208,56 +266,111 @@ export class SnapshotRepository {
       }
       throwIfCancelled(options.signal);
       options.onProgress?.({ phase: 'finalizing', total: manifestFiles.length });
-      const manifest: SnapshotManifest = {
+      manifest = {
         formatVersion: 1,
         snapshotId,
         projectId: options.projectId,
         projectName: options.projectName,
-        createdAt: new Date().toISOString(),
+        createdAt,
         reason: options.reason,
         git: options.git,
         roots: options.roots.map((root) => safeSegment(root.name)),
         files: manifestFiles,
         totalBytes,
       };
-      await writeFile(path.join(localSnapshotDirectory, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      await writeFile(path.join(localSnapshotDirectory, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+      frozen = true;
+      }
+      const readyManifest = manifest;
+      if (!readyManifest) throw new Error('SoloSync could not prepare the backup manifest.');
+      const updatePendingState = async (state: PendingBackupJob['state']): Promise<void> => {
+        if (!options.pendingDirectory) return;
+        await writePendingBackup(options.pendingDirectory, {
+          formatVersion: 1,
+          snapshotId: readyManifest.snapshotId,
+          projectId: readyManifest.projectId,
+          projectName: readyManifest.projectName,
+          createdAt: readyManifest.createdAt,
+          state,
+          totalBytes: readyManifest.totalBytes,
+          destinationIdentity: options.pendingDestinationIdentity ?? resumedJob?.destinationIdentity,
+        });
+      };
+      await updatePendingState('uploading');
+      if (options.pendingDirectory && await options.provider.exists(finalDirectory, options.signal)) {
+        const committedManifest = parseManifest(await options.provider.readFile(storageKey(finalDirectory, 'manifest.json'), options.signal));
+        if (committedManifest.snapshotId !== readyManifest.snapshotId || committedManifest.projectId !== readyManifest.projectId || committedManifest.files.length !== readyManifest.files.length) {
+          throw new Error('The published Google Drive snapshot does not match the pending backup.');
+        }
+        for (const file of readyManifest.files) {
+          const remote = storageKey(finalDirectory, 'files', file.root, ...file.path.split('/'));
+          if (await options.provider.hashFile(remote, options.signal) !== file.sha256) throw new Error(`The published copy of ${file.path} failed verification.`);
+        }
+        published = true;
+        await updatePendingState('committed');
+        return readyManifest;
+      }
       await options.provider.createDirectory(storageKey(projectDirectory, 'staging'), options.signal);
       await options.provider.createDirectory(storageKey(projectDirectory, 'snapshots'), options.signal);
       await uploadDirectory(options.provider, localSnapshotDirectory, stagingDirectory, options.signal);
       const uploadedManifest = parseManifest(await options.provider.readFile(storageKey(stagingDirectory, 'manifest.json'), options.signal));
-      if (uploadedManifest.snapshotId !== manifest.snapshotId || uploadedManifest.projectId !== manifest.projectId || uploadedManifest.files.length !== manifest.files.length) {
+      if (uploadedManifest.snapshotId !== readyManifest.snapshotId || uploadedManifest.projectId !== readyManifest.projectId || uploadedManifest.files.length !== readyManifest.files.length) {
         throw new Error('The backup location returned an incomplete snapshot manifest.');
       }
-      for (const file of manifest.files) {
+      for (const file of readyManifest.files) {
         throwIfCancelled(options.signal);
         const remote = storageKey(stagingDirectory, 'files', file.root, ...file.path.split('/'));
-        if (sha256Buffer(await options.provider.readFile(remote, options.signal)) !== file.sha256) {
+        if (await options.provider.hashFile(remote, options.signal) !== file.sha256) {
           throw new Error(`The uploaded copy of ${file.path} failed verification.`);
         }
       }
+      await updatePendingState('verified');
       throwIfCancelled(options.signal);
-      await options.provider.move(stagingDirectory, finalDirectory);
-      published = true;
-      const previousProject = await readProject(options.provider, options.projectId);
+      await updatePendingState('publishing');
+      await options.provider.move(stagingDirectory, finalDirectory, options.signal);
+      remoteCommitted = true;
+      await updatePendingState('committed');
+      const previousProject = await readProject(options.provider, options.projectId, options.signal);
       const project: BackupProject = {
         formatVersion: 1,
         projectId: options.projectId,
         projectName: options.projectName,
-        createdAt: previousProject?.createdAt ?? manifest.createdAt,
-        updatedAt: manifest.createdAt,
+        createdAt: previousProject?.createdAt ?? readyManifest.createdAt,
+        updatedAt: readyManifest.createdAt,
       };
-      await options.provider.writeFile(storageKey(projectDirectory, 'project.json'), Buffer.from(`${JSON.stringify(project, null, 2)}\n`));
-      const confirmed = await this.list(options.provider, options.projectId);
-      if (!confirmed.some((item) => item.snapshotId === manifest.snapshotId)) {
+      await options.provider.writeFile(storageKey(projectDirectory, 'project.json'), Buffer.from(`${JSON.stringify(project, null, 2)}\n`), options.signal);
+      const confirmed = await this.list(options.provider, options.projectId, options.signal);
+      if (!confirmed.some((item) => item.snapshotId === readyManifest.snapshotId)) {
         throw new Error('The snapshot was written but could not be confirmed in backup history.');
       }
-      return manifest;
+      published = true;
+      return readyManifest;
     } catch (error) {
-      if (!published) await options.provider.delete(stagingDirectory).catch(() => undefined);
-      if (options.signal?.aborted) throw new SnapshotCancelledError();
+      if (options.pendingDirectory && !frozen) await rm(options.pendingDirectory, { recursive: true, force: true });
+      if (options.signal?.aborted) {
+        const reconciliationController = new AbortController();
+        const reconciliationTimer = setTimeout(() => reconciliationController.abort(), 10_000);
+        try {
+          if (!published && (remoteCommitted || await options.provider.exists(finalDirectory, reconciliationController.signal))) {
+            throw new Error('Google Drive may have completed publication while the cancellation was arriving. Continue the pending backup so SoloSync can verify it.');
+          }
+          if (!remoteCommitted) await options.provider.delete(stagingDirectory, reconciliationController.signal);
+          await options.discardPendingCredentials?.();
+          discarded = true;
+        } catch (cleanupError) {
+          const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          throw new Error(`SoloSync could not safely cancel this pending backup: ${message}`);
+        } finally {
+          clearTimeout(reconciliationTimer);
+        }
+        throw new SnapshotCancelledError();
+      }
+      if (!options.pendingDirectory && !remoteCommitted) await options.provider.delete(stagingDirectory).catch(() => undefined);
       throw error;
     } finally {
-      await rm(temporaryRoot, { recursive: true, force: true });
+      if (!options.pendingDirectory || published || discarded) {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
     }
   }
 
@@ -286,14 +399,14 @@ export class SnapshotRepository {
     return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  async list(provider: StorageProvider, projectId: string): Promise<SnapshotManifest[]> {
+  async list(provider: StorageProvider, projectId: string, signal?: AbortSignal): Promise<SnapshotManifest[]> {
     const directory = storageKey('SoloSync', projectId, 'snapshots');
-    if (!(await provider.exists(directory))) return [];
-    const entries = (await provider.list(directory)).filter((entry) => entry.type === 'directory');
+    if (!(await provider.exists(directory, signal))) return [];
+    const entries = (await provider.list(directory, signal)).filter((entry) => entry.type === 'directory');
     const manifests: SnapshotManifest[] = [];
     for (const entry of entries) {
       try {
-        const manifest = parseManifest(await provider.readFile(storageKey(directory, entry.name, 'manifest.json')));
+        const manifest = parseManifest(await provider.readFile(storageKey(directory, entry.name, 'manifest.json'), signal));
         if (manifest.projectId === projectId && manifest.snapshotId === entry.name) manifests.push(manifest);
       } catch {
         // An invalid folder is never presented as a restorable snapshot.
@@ -308,7 +421,7 @@ export class SnapshotRepository {
     for (const file of manifest.files) {
       const source = storageKey(base, file.root, ...file.path.split('/'));
       try {
-        if (sha256Buffer(await provider.readFile(source)) !== file.sha256) {
+        if (await provider.hashFile(source) !== file.sha256) {
           errors.push(file.path);
         }
       } catch {
@@ -324,6 +437,7 @@ export class SnapshotRepository {
     for (const file of manifest.files) {
       const source = storageKey(base, file.root, ...file.path.split('/'));
       const target = path.join(destination, file.root, ...file.path.split('/'));
+      await mkdir(path.dirname(target), { recursive: true });
       await provider.downloadFile(source, target);
       if (await sha256(target) !== file.sha256) {
         await rm(target, { force: true });

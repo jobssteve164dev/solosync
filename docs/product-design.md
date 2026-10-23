@@ -142,7 +142,7 @@ interface StorageProvider {
 
 ### Google Drive
 
-- 本地桌面使用系统浏览器、Desktop OAuth、PKCE 与 loopback 回调。远程/code-server 的 Device Authorization Flow 必须先取得 Google 对目标宿主场景的确认并完成验证，不能因为 scope 可用就直接视为合规生产方案；Google 已停止支持自定义 URI scheme，因此也不把 VS Code URI handler 直接注册为 Google OAuth redirect URI。
+- 本地桌面使用系统浏览器、Desktop OAuth、PKCE 与 loopback 回调。Remote SSH、Dev Container、Coder、code-server 与 Web Extension 宿主使用固定 HTTPS Web OAuth 回调，并让用户把绑定 PKCE 的短时 SoloSync 回调码粘贴回连接提示；不使用 Google 已停止支持的 OOB 流程、自定义 URI scheme或 Device Authorization Flow。
 - 权限使用 `https://www.googleapis.com/auth/drive.file`，只访问插件创建或由用户明确交给插件的文件；不要申请完整 `drive` 权限。
 - 首次连接时自动创建 `SoloSync Backups` 文件夹并保存 folder ID，不再要求用户选择本地同步目录；后续按父级 ID 查询，避免依赖同名路径。
 - 大于 5 MB 或网络可能中断时使用 resumable upload；Google 官方建议可续传上传也适用于小文件，上传分块除最后一块外应为 256 KiB 的倍数。

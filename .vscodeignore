@@ -2,13 +2,19 @@
 .git/**
 docs/**
 !docs/qnap-webdav-design.md
+!docs/google-drive-native-design.md
+!docs/product-design.md
 src/**
 test/**
+worker/**
 scripts/**
 .solopreneur/**
 AGENTS.md
 PROJECT_MEMORY.md
 .gitignore
+.env
+.env.*
+!.env.example
 
 tsconfig.json
 *.vsix
@@ -19,3 +25,7 @@ out/historyTree.*
 out/snapshotRepository.*
 out/storageProvider.*
 out/types.*
+out/googleAuth.*
+out/googleAuthMode.*
+out/googleDriveClient.*
+out/googleDriveProvider.*

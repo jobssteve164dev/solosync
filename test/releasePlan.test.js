@@ -5,6 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+test('runs a lockfile-pinned Wrangler during release', () => {
+  const packageJson = require('../package.json');
+  const workflow = require('node:fs').readFileSync(path.resolve(__dirname, '../.github/workflows/publish.yml'), 'utf8');
+  assert.match(packageJson.devDependencies.wrangler, /^\d+\.\d+\.\d+$/);
+  assert.match(workflow, /npx --no-install wrangler deploy/);
+  assert.doesNotMatch(workflow, /wrangler@/);
+});
+
 const script = path.resolve(__dirname, '../scripts/release-plan.mjs');
 const projects = [];
 

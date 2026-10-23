@@ -3,6 +3,9 @@ out/
 *.vsix
 .vscode-test/
 coverage/
+.env
+.env.*
+!.env.example
 
 # SoloMap runtime state
 /.solopreneur/

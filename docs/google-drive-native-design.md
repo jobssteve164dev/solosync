@@ -6,11 +6,9 @@
 
 连接完成后，备份、历史、校验和恢复继续使用现有 SoloSync 入口；Google Drive 只是备份位置，不形成第二套操作方式。
 
-## 当前实现与目标状态
+## 当前实现
 
-当前 `googleDrive` 选项仍然调用本地文件夹选择器，实际依赖 Google Drive for desktop。它没有 Google 登录、Drive API 或云端连接状态。
-
-目标状态：
+`googleDrive` 已使用 Google 登录与 Drive API，不再调用本地文件夹选择器，也不依赖 Google Drive for desktop。系统会根据宿主环境自动选择本地 loopback 或 HTTPS 回调，用户始终只看到同一个 Google Drive 连接动作。
 
 | 用户动作 | 系统结果 |
 | --- | --- |
@@ -31,7 +29,7 @@
 4. 授权返回后，SoloSync 自动创建或找回 `SoloSync Backups` 文件夹，执行创建、上传、读取、重命名和删除临时对象的连接测试。
 5. 成功状态显示 Google 账号、`SoloSync Backups` 和“已连接”。不再弹出本地文件夹选择器。
 
-首个可发布版本只承诺本地桌面 VS Code 的原生登录。Remote SSH、Dev Container 与 code-server 不把桌面的 loopback 回调或自定义 URI scheme 硬套到远端，也不在 Google 尚未确认适用性时把 Limited Input Device Flow 当成正式方案。界面仍保持同一个“使用 Google 登录”入口；运行环境不受支持时，直接说明“当前环境暂不支持 Google Drive 登录”，不退回本地文件夹选择器，也不让用户选择 OAuth 类型。
+本地桌面 VS Code 使用 loopback 回调。Remote SSH、Dev Container、Coder、code-server 与 Web Extension 宿主使用 `https://solosync.szlk.uk/oauth/google/callback`：授权页返回一个短时、一次性使用的 SoloSync 回调码，用户将它粘贴回同一个连接提示。该码绑定当前连接请求的 PKCE verifier，不是 Google 已停用的 OOB 授权码。
 
 ### 设置页
 
@@ -55,7 +53,7 @@ name@example.com · SoloSync Backups · 已连接
 ## 数据安全边界
 
 - HTTPS 保护上传和下载过程，但首版不提供客户端加密。Drive 中的备份可由所登录账号以及该文件夹的协作者读取。
-- 原生云端备份新增敏感文件检查：每次冻结备份内容前扫描 `.env`、`.env.*`、`*.pem`、`*.key`、`id_rsa*` 等高风险文件。尚无持久决策的新命中必须让用户选择“排除这些路径（推荐）”“始终包含这些路径”或“取消备份”；选择按项目和精确相对路径持久保存，后续新增路径仍会再次询问，并可在设置页撤销。当前代码只有风险提示，这项检查属于实现范围，不能写成已有能力。
+- 原生云端备份会在冻结内容前扫描 `.env`、`.env.*`、`*.pem`、`*.key`、`id_rsa*` 等高风险文件。尚无持久决策的新命中会让用户选择“排除这些路径（推荐）”“始终包含这些路径”或“取消备份”；选择按项目和精确相对路径保存，后续新增路径仍会再次询问，并可在设置页撤销。
 - 根文件夹默认创建在用户 My Drive，文件归用户所有并占用其 Drive 配额。若用户后来把根文件夹移动到共享位置或扩大权限，设置页显示“此备份文件夹已共享”，但不擅自修改用户的 Drive 权限。
 - `drive.file` 限制 SoloSync 的 API 访问范围，不等于对备份内容进行加密。
 
@@ -80,14 +78,11 @@ https://www.googleapis.com/auth/drive.file
 
 ### 远程与 code-server 环境
 
-Google 的 Device Authorization Flow 文档面向电视、游戏机、打印机等受限输入设备；不能只因为它技术上允许 `drive.file`，就推断 Remote SSH、Dev Container 或 code-server 可以合规发布。VS Code 的 `asExternalUri` 也可能产生动态回调地址，而 Google 的 installed-app 流程已不支持自定义 URI scheme，因此首版采用明确的发布门槛：
-
-- 认证层先抽象为 `GoogleAuthTransport`，本地桌面只实现并发布 `DesktopLoopbackTransport`。
-- `DeviceCodeTransport` 可用于开发验证，但在取得 Google 对目标环境和 OAuth client 类型的书面确认、完成应用验证并通过真实远程环境验收前，不进入生产包。
-- 若后续获准启用 Device Flow，必须遵守服务端返回的轮询 `interval`、`slow_down` 与过期时间；取消连接立即停止轮询。
-- 不建设保存用户 Google 令牌的中转服务，也不使用已停止支持的自定义 URI scheme。
-
-这个限制只影响可登录的宿主环境，不改变备份位置的统一心智，也不允许重新暴露“请选择同步文件夹”。
+- 使用 Web application OAuth client、Authorization Code 与 PKCE `S256`，回调地址固定为 `https://solosync.szlk.uk/oauth/google/callback`。
+- 无状态 Cloudflare Worker 校验并封装短时 state/callback code；callback code 绑定 PKCE challenge 且十分钟过期。
+- Worker 仅在换取、刷新或撤销令牌时短暂解封 refresh token，返回给扩展的是 AES-GCM 封装的 opaque credential；服务端不持久化用户令牌，不使用 KV/D1。
+- 备份上传、校验与恢复由扩展直接访问 Drive API，不经过 Worker。
+- 不使用 Google 已停用的 OOB 流程、自定义 URI scheme 或面向受限输入设备的 Device Authorization Flow。
 
 ### 令牌生命周期
 
@@ -170,10 +165,10 @@ Drive 允许同一父目录下存在重名文件，所以每个逻辑 key 必须
 
 ### 可跨重启的备份任务
 
-当前仓库每次备份都会生成新 snapshot ID，把源文件复制到系统临时目录，并在 `finally` 中删除本地副本；仅保存上传 URI 无法在扩展重启后真正续传。实现原生 Drive 时必须同时引入持久备份任务：
+Google Drive 备份使用可跨重启恢复的持久任务：
 
 ```text
-globalStorage/pending/<snapshot-id>/
+globalStorage/pending/<project-id>/
   job.json
   manifest.json
   files/...
@@ -181,10 +176,10 @@ globalStorage/pending/<snapshot-id>/
 
 - snapshot ID 只在任务创建时生成一次。工作区文件复制到上述稳定目录后冻结；后续重试和恢复都使用同一份副本，避免用户修改工作区导致同一个快照内容漂移。
 - 创建冻结副本前检查 `globalStorageUri` 所在卷的可用空间；至少满足预计副本大小加固定安全余量，否则在复制前提示所需和可用空间，不留下半份任务。估算后若仍因 `ENOSPC` 或其他本地写入错误中断，精确清理由本次创建且尚未进入上传阶段的 pending 目录并核对无残留。pending 目录使用宿主可提供的最小权限（POSIX 目录 `0700`、文件 `0600`；其他平台继承 VS Code 用户数据目录 ACL）。
-- `job.json` 记录 project ID、snapshot ID、manifest hash、远端 snapshot folder ID、每个逻辑 key 的预留 Drive ID、大小、源指纹、状态和重试次数；上传 session URI 单独按任务和文件保存在 `SecretStorage`。
-- 扩展启动时扫描 pending 任务，先验证本地副本与 manifest，再查询服务端上传状态，按 Google 返回的 `Range` 继续；本地记录的 offset 只能辅助展示，不能作为服务端已接收字节数的事实来源。
+- `job.json` 记录 project ID、snapshot ID、项目名、创建时间、总大小、状态，以及由稳定 Google 账号身份和 canonical root ID 组成的目标身份；上传 session URI 与每个逻辑 key 的预留 Drive ID 分别保存在 `SecretStorage` 和扩展全局状态中。
+- 用户继续备份或同一项目再次触发备份时，先验证本地副本与 manifest，再查询服务端上传状态，按 Google 返回的 `Range` 继续；本地不把缓存 offset 当作服务端已接收字节数的事实来源。
 - resumable session 可能在约一周后过期。收到 `404`/`410` 或任务年龄超过安全窗口时，先按预留 file ID 查询：对象已完整存在则核验并继续；否则用同一预留 ID 建立新会话并从服务端确认的起点上传。
-- 发布是显式状态机：`uploading -> verified -> publishing -> committed`。`files.update` 响应丢失或扩展在发布中退出时，恢复流程按稳定 snapshot folder ID 执行 `files.get`，校验 canonical project parent、名称和 `lifecycle`；已经是 `committed` 就视为发布成功并进入最终清理，仍是 `staging` 才重试发布，ID 丢失或属性不一致则进入“需要修复”。
+- 发布是显式状态机：`uploading -> verified -> publishing -> committed`。`files.update` 响应丢失或扩展在发布中退出时，恢复流程按 snapshot ID 和 app properties 解析稳定 folder，校验 manifest 与全部文件哈希；已经是 `committed` 就视为发布成功并进入最终清理，仍是 `staging` 才重试发布，属性不一致则停止并保留冻结副本。
 - 只有快照完整校验并确认已发布后才删除本地 pending 目录、任务记录和 session secret。用户主动取消或确认放弃不可恢复任务时，只清理本地 pending、session secret 和仍为 `staging` 且属于本任务的远端对象；按稳定 ID 确认已处于 `committed` 的对象永不进入取消清理。暂时性网络、限流或扩展退出必须保留任务以便恢复。
 - 设置页显示 pending 任务占用空间、创建时间和状态，提供“继续”和经确认的“放弃待上传备份”；成功、取消或放弃后都必须核对本地空间已释放。
 - 启动恢复、手动重试和新建备份必须按 project ID 加锁；已有 pending 任务时继续该任务，不得生成另一个 snapshot ID。

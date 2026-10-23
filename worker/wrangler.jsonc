@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "solosync-oauth",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": false,
+  "keep_vars": true,
+  "routes": [
+    {
+      "pattern": "solosync.szlk.uk",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://solosync.szlk.uk"
+  }
+}
