@@ -105,11 +105,15 @@ Drive 的物理布局使用内容寻址，并把所有项目的小型快照记�
 SoloSync Backups/
   Backup History/                   role=history, format=2（全局唯一）
     <snapshot-time-and-id>.json     role=snapshot, format=2, lifecycle=staging|committed
+    Previous File Versions/         role=version-history, format=2（全局唯一）
+      <name>.<hash-prefix>.<ext>    role=object（不可变恢复内容）
   <project-name>/                   role=project, projectId=...
-    <original-file-name.ext>        role=object, contentSha256=...（内容文件）
+    <workspace-root>/               role=current-directory
+      <relative-path>/              role=current-directory
+        <original-file-name.ext>    role=current, contentSha256=..., sourcePathHash=...（当前内容）
 ```
 
-`objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。Drive 中 object 直接位于 project folder 下，并以该内容对应的原文件名和扩展名展示；新快照的 manifest 则直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。对象身份始终由稳定 Drive ID、logical key hash 和 `contentSha256` 决定，不依赖显示名；相同内容仍只保存一份。旧版已写入的纯哈希显示名会在该内容再次被快照引用时原地改名，不重新上传文件。旧 format-1 snapshot 目录以及 0.0.11 产生的快照目录保持可读、可校验和可恢复。
+`objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。不可变 object 从创建起就位于 `Backup History/Previous File Versions`，相同内容只保存一份并供所有历史快照恢复。project folder 里的 `current` 是独立的用户可读副本，并按 workspace root 与相对目录建立 `current-directory`，所以不同路径的同名文件不会被压平到一个目录。每个来源路径使用一个稳定 Drive ID，内容变化在 snapshot 发布后通过 `files.update` 原位替换，不新增同名当前文件。新快照 manifest 直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。`sourcePathHash` 只标识当前副本对应的来源路径；同内容的不同路径不会被折叠。0.0.12 留在 project folder 的 object 会在下次备份迁移进文件历史。旧 format-1 snapshot 目录保持可读、可校验和可恢复。
 
 根文件夹 ID 存入 `globalState`。即使用户在 Drive 中重命名或移动文件夹，SoloSync 仍按稳定 ID 访问。若 ID 不可用，则按 app-private `appProperties` 搜索；找不到时提示用户重新创建，不静默改用同名陌生文件夹。
 
@@ -122,17 +126,18 @@ SoloSync Backups/
 ```json
 {
   "product": "solosync",
-  "role": "root|history|project|snapshot|object|file",
+  "role": "root|history|version-history|project|snapshot|object|current-directory|current|file",
   "format": "1|2",
   "projectId": "...",
   "snapshotId": "...",
   "logicalKeyHash": "...",
   "contentSha256": "...",
+  "sourcePathHash": "...",
   "lifecycle": "staging|committed"
 }
 ```
 
-字段按角色填写：root/history 不需要 project/snapshot/lifecycle，project 不需要 snapshot/lifecycle；object 填写 project ID、logical key hash 和 content SHA-256，但不绑定单个 snapshot；snapshot record 与旧格式子文件填写完整的 project ID、snapshot ID、logical key hash，snapshot 还必须填写 lifecycle。根、项目、内容对象和旧快照使用既有 format 1；集中历史目录与直接 manifest record 使用 format 2。
+字段按角色填写：root/history/version-history 不需要 project/snapshot/lifecycle，project 不需要 snapshot/lifecycle；不可变 object 填写 project ID、logical key hash 和 content SHA-256，但不绑定单个 snapshot；current 额外填写 sourcePathHash、content SHA-256 和最近 snapshot ID；snapshot record 与旧格式子文件填写完整的 project ID、snapshot ID、logical key hash，snapshot 还必须填写 lifecycle。根、项目、内容对象和旧快照使用既有 format 1；集中历史目录、文件历史目录与直接 manifest record 使用 format 2。
 
 文件和文件夹始终以 Drive file ID 为身份，名称只用于用户可读展示，不作为唯一定位依据。
 
@@ -155,8 +160,9 @@ Drive 允许同一父目录下存在重名文件，所以每个逻辑 key 必须
 - `createDirectory("SoloSync/<project>/staging")` 与 `createDirectory("SoloSync/<project>/snapshots")`：先幂等确保 canonical project folder 已存在（覆盖当前仓库首次备份不会单独创建 project key 的调用顺序），再成功返回；对中间容器本身是虚拟 no-op，绝不创建这两个物理 folder。
 - `createDirectory("SoloSync/<project>/objects")`：确保 project folder 已存在后返回；objects 同样是虚拟容器。
 - `createDirectory("SoloSync/<project>/staging/<snapshot-id>")`：确保唯一 `Backup History` 存在并为 manifest record 预留稳定 ID；该逻辑目录本身不创建物理 snapshot folder。
-- `writeFile("SoloSync/<project>/objects/<sha256>")`：只在对象不存在时上传，Drive 显示名使用原文件名和扩展名；上传响应和后续批量列表返回服务端 SHA-256，后续 snapshot 直接复用该稳定对象。
-- `reconcileFiles`：一次分页列出项目的全部内容对象，按 logical key hash 与 Drive 返回的 SHA-256 校验当前快照引用；新上传对象再执行一次同类列表确认。校验不再为每个未变化文件分别查询和下载正文。
+- `writeFile("SoloSync/<project>/objects/<sha256>")`：只在对象不存在时上传到 `Previous File Versions`，显示名附加哈希前缀，上传响应和后续批量列表返回服务端 SHA-256，后续 snapshot 直接复用该稳定对象。
+- `reconcileFiles`：一次分页按 app properties 列出该项目全部不可变内容对象，按 logical key hash 与 Drive 返回的 SHA-256 校验当前快照引用；新上传对象再执行一次同类列表确认。校验不再为每个未变化文件分别查询和下载正文。
+- `syncVisibleFiles`：仅在 snapshot 成为 committed 后运行，先确认它仍是最新 committed snapshot，再按完整来源相对路径建立目录和 current 身份；首次创建后复查并收敛并发重复项，后续变化在写入前重读稳定 ID，并对同一 ID 执行内容 `PATCH`。写入结束后再次读取最新 committed snapshot；若另一个客户端在本次写入期间发布了更新快照，则从不可变历史重建最新 current，确保交错完成的替换最终收敛到最新内容。删除的来源路径只移除 current，不影响历史快照引用的 object。
 - `writeFile(".../staging/<snapshot-id>/manifest.json")`：直接在唯一 `Backup History` 下写入 `<snapshot-id>.json` record，保留同一预留 ID 用于响应丢失后的幂等恢复。
 - `exists/list(".../staging")`：把历史目录中 `lifecycle=staging` 的 format-2 records 与项目目录下旧版 staging snapshot folders 投影为统一逻辑目录；`exists/list(".../snapshots")` 同样合并 committed record 与旧目录，并消费全部分页。
 - `exists/list`、对象读写以及旧格式 `files/...` key 都通过 project ID、snapshot ID、lifecycle、logical key hash 和任务账本解析到稳定 Drive ID，不能按显示名遍历猜测。
@@ -238,8 +244,9 @@ src/sensitiveFileReview.ts  云端备份前的敏感文件扫描与排除决策
 - “断开此设备”不影响另一台已登录设备；“撤销全部授权”经确认后让所有设备在下次访问时进入“需要重新登录”，两者都不删除备份。
 - 令牌刷新、`invalid_grant`、Workspace 管理员拒绝、403 两类限流、429、5xx、上传响应丢失、上传 session 过期、扩展重启和主动取消均有自动化测试。
 - 模拟同名对象、两台设备同时创建根/项目目录和同时为同一项目备份：不能任意选择重复对象，项目目录最终收敛到 canonical ID，两个有效 snapshot 都可发现，冲突对象不能被覆盖或删除。
-- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder 与唯一历史目录；单页且无节流时，包含首次连接的全新空项目最多使用 21 个远端请求，活跃连接上的一个变化小文件使用 8 个，重复未修改快照使用 6 个，重连后执行未修改快照最多 14 个。连接请求包含可并行执行的已归并目录检查，用于收敛另一个仍在线的旧窗口发生的延迟写入。
-- Drive 中的新内容对象显示原文件名与扩展名；再次引用旧版纯哈希名称对象时只原地更新显示名，不重新上传内容。
+- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder 与唯一历史目录；单页且无节流时，包含首次连接的全新空项目最多使用 25 个远端请求，活跃连接上的一个变化小文件最多 23 个，重复未修改快照最多 11 个，重连后执行未修改快照最多 22 个。
+- 更新既有 current 最多使用 15 个远端请求；变化回历史中已有内容时最多 12 个，仍低于 30 次链路预算。
+- Drive 项目目录里的 current 显示原文件名与扩展名；不可变历史 object 使用文件名加短哈希避免历史目录里的同名混淆。
 - Drive backend 不创建或依赖 `project.json`；项目列表、最近时间、历史与新设备恢复从 committed history records 与旧版 committed snapshot folders 合并派生。
 - 在上传第一个分块、中间分块、服务端已接收但客户端未收到响应、上传完成但发布前、发布成功但客户端未收到响应五个位置分别强制退出；重启后复用同一 snapshot ID、manifest record ID 和稳定本地副本，从服务端 `Range` 或稳定 Drive ID 的实际状态恢复。
 - 发布响应丢失后，已经标记 `committed` 的 snapshot 被识别为成功；随后点击取消也不能删除它。

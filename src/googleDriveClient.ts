@@ -35,7 +35,8 @@ function escapeQuery(value: string): string {
 }
 
 function sessionKey(item: { id: string; appProperties?: Record<string, string> }): string {
-  return `google-drive-upload:${item.appProperties?.projectId ?? 'unknown'}:${item.id}`;
+  const currentContent = item.appProperties?.role === 'current' ? item.appProperties.contentSha256 : undefined;
+  return `google-drive-upload:${item.appProperties?.projectId ?? 'unknown'}:${item.id}${currentContent ? `:${currentContent}` : ''}`;
 }
 
 export class GoogleDriveClient implements GoogleDriveApi {
@@ -154,6 +155,29 @@ export class GoogleDriveClient implements GoogleDriveApi {
     return files;
   }
 
+  async listFiles(properties: Record<string, string> = {}, signal?: AbortSignal): Promise<GoogleDriveItem[]> {
+    const query = ['trashed = false'];
+    for (const [key, value] of Object.entries(properties)) {
+      query.push(`appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' }`);
+    }
+    const files: GoogleDriveItem[] = [];
+    let pageToken: string | undefined;
+    do {
+      const parameters = new URLSearchParams({
+        q: query.join(' and '),
+        spaces: 'drive',
+        fields: `nextPageToken,files(${itemFields})`,
+        pageSize: '1000',
+      });
+      if (pageToken) parameters.set('pageToken', pageToken);
+      const response = await this.request(`${driveApi}/files?${parameters}`, { signal });
+      const body = await response.json() as { files?: GoogleDriveItem[]; nextPageToken?: string };
+      files.push(...(body.files ?? []));
+      pageToken = body.nextPageToken;
+    } while (pageToken);
+    return files;
+  }
+
   async listFolders(properties: Record<string, string> = {}, signal?: AbortSignal): Promise<GoogleDriveItem[]> {
     const query = [`mimeType = '${folderMimeType}'`, 'trashed = false'];
     for (const [key, value] of Object.entries(properties)) {
@@ -190,18 +214,28 @@ export class GoogleDriveClient implements GoogleDriveApi {
   async uploadFile(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, source: string | Buffer, signal?: AbortSignal): Promise<GoogleDriveItem> {
     const size = Buffer.isBuffer(source) ? source.length : (await stat(source)).size;
     if (size <= multipartLimit && !await this.options.sessions.get(sessionKey(item))) {
-      return this.uploadMultipart(item, Buffer.isBuffer(source) ? source : await readFile(source), signal);
+      return this.uploadMultipart(item, Buffer.isBuffer(source) ? source : await readFile(source), signal, false);
     }
-    return this.uploadFileAttempt(item, source, signal, false);
+    return this.uploadFileAttempt(item, source, signal, false, false);
+  }
+
+  async replaceFile(item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, source: string | Buffer, signal?: AbortSignal): Promise<GoogleDriveItem> {
+    const size = Buffer.isBuffer(source) ? source.length : (await stat(source)).size;
+    if (size <= multipartLimit && !await this.options.sessions.get(sessionKey(item))) {
+      return this.uploadMultipart(item, Buffer.isBuffer(source) ? source : await readFile(source), signal, true);
+    }
+    return this.uploadFileAttempt(item, source, signal, false, true);
   }
 
   private async uploadMultipart(
     item: { id: string; name: string; parents: string[]; appProperties: Record<string, string> },
     content: Buffer,
     signal?: AbortSignal,
+    replace = false,
   ): Promise<GoogleDriveItem> {
     const boundary = `solosync-${randomUUID()}`;
-    const prefix = Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(item)}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`);
+    const metadata = replace ? { name: item.name, appProperties: item.appProperties } : item;
+    const prefix = Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`);
     const body = Buffer.concat([prefix, content, Buffer.from(`\r\n--${boundary}--\r\n`)]);
     const matches = (existing: GoogleDriveItem | undefined): existing is GoogleDriveItem => Boolean(existing
       && existing.id === item.id
@@ -212,8 +246,9 @@ export class GoogleDriveClient implements GoogleDriveApi {
       && Object.entries(item.appProperties).every(([key, value]) => existing.appProperties[key] === value));
     let result: GoogleDriveItem;
     try {
-      const response = await this.request(`${driveUploadApi}/files?uploadType=multipart&fields=${encodeURIComponent(itemFields)}`, {
-        method: 'POST',
+      const target = replace ? `/files/${encodeURIComponent(item.id)}` : '/files';
+      const response = await this.request(`${driveUploadApi}${target}?uploadType=multipart&fields=${encodeURIComponent(itemFields)}`, {
+        method: replace ? 'PATCH' : 'POST',
         headers: { 'content-type': `multipart/related; boundary=${boundary}`, 'content-length': String(body.length) },
         body,
         signal,
@@ -234,20 +269,22 @@ export class GoogleDriveClient implements GoogleDriveApi {
     source: string | Buffer,
     signal: AbortSignal | undefined,
     rebuiltSession: boolean,
+    replace: boolean,
   ): Promise<GoogleDriveItem> {
     const key = sessionKey(item);
     let uploadUri = await this.options.sessions.get(key);
     const resumed = Boolean(uploadUri);
     const size = Buffer.isBuffer(source) ? source.length : (await stat(source)).size;
     if (!uploadUri) {
-      const response = await this.request(`${driveUploadApi}/files?uploadType=resumable&fields=${encodeURIComponent(itemFields)}`, {
-        method: 'POST',
+      const target = replace ? `/files/${encodeURIComponent(item.id)}` : '/files';
+      const response = await this.request(`${driveUploadApi}${target}?uploadType=resumable&fields=${encodeURIComponent(itemFields)}`, {
+        method: replace ? 'PATCH' : 'POST',
         headers: {
           'content-type': 'application/json; charset=UTF-8',
           'x-upload-content-type': 'application/octet-stream',
           'x-upload-content-length': String(size),
         },
-        body: JSON.stringify(item),
+        body: JSON.stringify(replace ? { name: item.name, appProperties: item.appProperties } : item),
         signal,
       });
       uploadUri = response.headers.get('location') ?? undefined;
@@ -295,7 +332,7 @@ export class GoogleDriveClient implements GoogleDriveApi {
         if (completed) return completed;
         if (rebuiltSession) throw new Error('Google Drive upload sessions expired repeatedly. Continue the pending backup to try again.');
         await this.options.sessions.delete(key);
-        return this.uploadFileAttempt(item, source, signal, true);
+        return this.uploadFileAttempt(item, source, signal, true, replace);
       }
       if (status.status !== 308) throw new Error(`Google Drive upload status check failed (${status.status}).`);
       const acknowledged = status.headers.get('range')?.match(/bytes=0-(\d+)/)?.[1];
@@ -328,7 +365,7 @@ export class GoogleDriveClient implements GoogleDriveApi {
           if (completed) return completed;
           if (rebuiltSession) throw new Error('Google Drive upload sessions expired repeatedly. Continue the pending backup to try again.');
           await this.options.sessions.delete(key);
-          return this.uploadFileAttempt(item, source, signal, true);
+          return this.uploadFileAttempt(item, source, signal, true, replace);
         }
         if (!response.ok) throw new Error(`Google Drive upload failed (${response.status}).`);
         return finish(response);
@@ -350,14 +387,14 @@ export class GoogleDriveClient implements GoogleDriveApi {
     return response.json() as Promise<GoogleDriveItem>;
   }
 
-  async update(id: string, patch: { name?: string; appProperties?: Record<string, string>; addParent?: string; removeParent?: string }, signal?: AbortSignal): Promise<GoogleDriveItem> {
+  async update(id: string, patch: { name?: string; appProperties?: Record<string, string>; addParent?: string; removeParent?: string; trashed?: boolean }, signal?: AbortSignal): Promise<GoogleDriveItem> {
     const parameters = new URLSearchParams({ fields: itemFields });
     if (patch.addParent) parameters.set('addParents', patch.addParent);
     if (patch.removeParent) parameters.set('removeParents', patch.removeParent);
     const response = await this.request(`${driveApi}/files/${encodeURIComponent(id)}?${parameters}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: patch.name, appProperties: patch.appProperties }),
+      body: JSON.stringify({ name: patch.name, appProperties: patch.appProperties, trashed: patch.trashed }),
       signal,
     });
     return response.json() as Promise<GoogleDriveItem>;
@@ -387,8 +424,8 @@ export class GoogleDriveClient implements GoogleDriveApi {
     return hash.digest('hex');
   }
 
-  async forgetUpload(id: string, projectId: string): Promise<void> {
-    await this.options.sessions.delete(sessionKey({ id, appProperties: { projectId } }));
+  async forgetUpload(id: string, projectId: string, contentSha256?: string): Promise<void> {
+    await this.options.sessions.delete(sessionKey({ id, appProperties: { projectId, ...(contentSha256 ? { role: 'current', contentSha256 } : {}) } }));
   }
 
   async downloadFile(id: string, destination: string, signal?: AbortSignal): Promise<void> {

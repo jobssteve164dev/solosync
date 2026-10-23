@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.12` is the release candidate for readable Google Drive object names and the unified low-request incremental snapshot path; `0.0.11` remains the latest published version until the candidate passes release gates.
+- Current stage: Version `0.0.13` is the release candidate that replaces the visible Google Drive file for a changed source path while retaining old contents in centralized file history; `0.0.12` is the latest published version until the candidate passes release gates.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -32,8 +32,9 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Native Google Drive uses `drive.file`, resumable direct uploads, and PKCE. Desktop VS Code uses a loopback callback; browser-hosted VS Code uses the HTTPS broker at `solosync.szlk.uk`, which returns an encrypted opaque credential and never proxies backup contents.
 - New format-2 snapshots store one verified object per distinct SHA-256 under the project. On Google Drive, manifests are timestamped records inside one root-level `Backup History` folder rather than one physical folder plus `manifest.json` per automatic backup; older snapshot folders remain readable and restorable.
 - Google Drive connections and resolved paths are cached for the extension session, small files use one multipart request, larger files use 8 MiB resumable chunks, and successful backup completion updates the in-memory history instead of rereading every historical manifest.
-- Google Drive keeps SHA-256 as the private logical identity while showing the original file name and extension. Object integrity is reconciled in one paginated metadata listing using Drive's SHA-256 checksum; legacy hash-named objects are renamed without content re-upload when reused.
-- The measured single-page Drive request budgets are 21 for the first connected empty backup, 8 for one changed small file on an active connection, 6 for an unchanged snapshot, and 14 for reconnect plus unchanged backup. The connection totals include parallel recovery checks for late writes into previously merged folders. A 100-ID reservation pool amortizes occasional refills.
+- Google Drive keeps immutable SHA-256-addressed restore objects in `Backup History/Previous File Versions`. Object integrity is reconciled in one paginated metadata listing using Drive's SHA-256 checksum.
+- Each source path has a separate readable current file under mirrored workspace-relative directories in its project folder. Changes update that stable Drive file ID in place with `files.update` only after snapshot publication; current identity is keyed by source-path hash, so same-basename and same-content paths remain independently visible. A latest-committed snapshot gate skips known-stale runs, and a post-write reconciliation rebuilds the current view from immutable history if a newer snapshot commits while an older replacement is already in flight. Version 0.0.12 objects left in the project folder migrate into immutable history on the next backup.
+- The measured single-page Drive request ceilings are 25 for the first connected empty backup, 23 for one changed small file on an active connection, 11 for an unchanged snapshot, and 22 for reconnect plus unchanged backup. Updating an established visible file stays within 15 requests; changing back to retained content stays within 12. A 100-ID reservation pool amortizes occasional refills.
 - The same Cloudflare Worker serves the public SoloSync home page at `/`, privacy policy at `/privacy`, terms at `/terms`, PNG application logo at `/icon.png`, and OAuth callback at `/oauth/google/callback`.
 - Client-side encryption and retention remain later milestones documented in `docs/product-design.md`.
 

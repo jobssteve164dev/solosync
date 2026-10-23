@@ -45,6 +45,28 @@ test('lists all Drive pages with an authenticated app-property query', async () 
   assert.match(requests[0].url.searchParams.get('fields'), /sha256Checksum/);
 });
 
+test('lists content objects across current and historical parents by app properties', async () => {
+  let request;
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async (input) => {
+      request = new URL(String(input));
+      return Response.json({ files: [
+        { id: 'current', name: 'source.txt', mimeType: 'application/octet-stream', parents: ['project'], appProperties: { product: 'solosync', role: 'object', projectId: 'project-1' } },
+        { id: 'historical', name: 'source.12345678.txt', mimeType: 'application/octet-stream', parents: ['history'], appProperties: { product: 'solosync', role: 'object', projectId: 'project-1' } },
+      ] });
+    },
+  });
+
+  const files = await client.listFiles({ product: 'solosync', role: 'object', projectId: 'project-1' });
+
+  assert.deepEqual(files.map((file) => file.id), ['current', 'historical']);
+  assert.doesNotMatch(request.searchParams.get('q'), /in parents/);
+  assert.match(request.searchParams.get('q'), /key='role' and value='object'/);
+  assert.match(request.searchParams.get('q'), /key='projectId' and value='project-1'/);
+});
+
 test('reserves Drive IDs in one batch for consecutive creates', async () => {
   const requests = [];
   const client = new GoogleDriveClient({
@@ -104,6 +126,34 @@ test('uploads a small file and its metadata in one multipart request', async () 
   assert.ok(requests[0].body.includes(Buffer.from('small')));
 });
 
+test('replaces a small Drive file in place with PATCH instead of creating another file', async () => {
+  const requests = [];
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+    fetch: async (input, init) => {
+      requests.push({ url: String(input), method: init.method, body: Buffer.from(init.body) });
+      return Response.json({
+        id: 'stable-current-id', name: 'source.txt', mimeType: 'application/octet-stream', parents: ['project'],
+        appProperties: { product: 'solosync', role: 'current', snapshotId: 'new' }, size: '3',
+      });
+    },
+  });
+
+  const replaced = await client.replaceFile({
+    id: 'stable-current-id', name: 'source.txt', parents: ['project'],
+    appProperties: { product: 'solosync', role: 'current', snapshotId: 'new' },
+  }, Buffer.from('new'));
+
+  assert.equal(replaced.id, 'stable-current-id');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'PATCH');
+  assert.match(requests[0].url, /\/upload\/drive\/v3\/files\/stable-current-id\?/);
+  assert.ok(requests[0].body.includes(Buffer.from('new')));
+  assert.doesNotMatch(requests[0].body.toString('utf8'), /"id":"stable-current-id"/);
+  assert.doesNotMatch(requests[0].body.toString('utf8'), /"parents"/);
+});
+
 test('uploads resumable chunks and removes the credential-bearing session URI', async () => {
   const sessions = new Map();
   const storedSessionKeys = [];
@@ -139,6 +189,44 @@ test('uploads resumable chunks and removes the credential-bearing session URI', 
   assert.deepEqual(puts.at(-1), { range: 'bytes 16777216-18874367/18874368', length: 2097152 });
   assert.equal(sessions.size, 0);
   assert.deepEqual(storedSessionKeys, ['google-drive-upload:project-1:file-1']);
+});
+
+test('does not resume a stale current-file upload session after the desired content changes', async () => {
+  const oldKey = 'google-drive-upload:project-1:stable-current:old-sha';
+  const newKey = 'google-drive-upload:project-1:stable-current:new-sha';
+  const sessions = new Map([[oldKey, 'https://upload.example/stale-current']]);
+  const requests = [];
+  const client = new GoogleDriveClient({
+    tokens: { accessToken: async () => 'access-token' },
+    sessions: {
+      get: async (key) => sessions.get(key),
+      store: async (key, value) => sessions.set(key, value),
+      delete: async (key) => sessions.delete(key),
+    },
+    fetch: async (input, init) => {
+      const url = String(input);
+      requests.push({ url, method: init.method });
+      if (url.includes('uploadType=resumable')) return new Response(null, { status: 200, headers: { location: 'https://upload.example/new-current' } });
+      if (url === 'https://upload.example/new-current') {
+        return Response.json({
+          id: 'stable-current', name: 'large.bin', mimeType: 'application/octet-stream', parents: ['project'],
+          appProperties: { product: 'solosync', role: 'current', projectId: 'project-1', contentSha256: 'new-sha' },
+          size: String(6 * 1024 * 1024),
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+
+  await client.replaceFile({
+    id: 'stable-current', name: 'large.bin', parents: ['project'],
+    appProperties: { product: 'solosync', role: 'current', projectId: 'project-1', contentSha256: 'new-sha' },
+  }, Buffer.alloc(6 * 1024 * 1024));
+
+  assert.equal(requests.some((request) => request.url === 'https://upload.example/stale-current'), false);
+  assert.equal(requests[0].method, 'PATCH');
+  assert.equal(sessions.has(newKey), false);
+  assert.equal(sessions.get(oldKey), 'https://upload.example/stale-current');
 });
 
 test('asks Drive for the acknowledged offset before resuming a saved upload session', async () => {
@@ -265,7 +353,7 @@ test('uploads an empty file and validates the returned stable file identity', as
   assert.equal(result.id, 'file-1');
 });
 
-test('trashes a Drive item with one metadata update', async () => {
+test('trashes and restores a Drive item with metadata updates', async () => {
   const requests = [];
   const client = new GoogleDriveClient({
     tokens: { accessToken: async () => 'access-token' },
@@ -277,9 +365,11 @@ test('trashes a Drive item with one metadata update', async () => {
   });
 
   await client.trash('file-1');
+  await client.update('file-1', { trashed: false });
 
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
   assert.deepEqual(requests[0].body, { trashed: true });
+  assert.deepEqual(requests[1].body, { trashed: false });
 });
 
 test('retries Drive rate limits using Retry-After', async () => {

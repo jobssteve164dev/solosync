@@ -4,7 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, w
 import os from 'node:os';
 import path from 'node:path';
 import { isPathInsideDirectory } from './backupLocation';
-import { normalizeStorageKey, StorageFileExpectation, StorageFileStatus, StorageProvider } from './storageProvider';
+import { normalizeStorageKey, StorageFileExpectation, StorageFileStatus, StorageProvider, StorageVisibleFileExpectation } from './storageProvider';
 import { SnapshotFile, SnapshotManifest, WorkspaceRoot } from './types';
 import { isCompatiblePendingDestination, PendingBackupJob, readPendingBackup, requirePendingCapacity, writePendingBackup } from './pendingBackup';
 import { isExcludedPath } from './exclusions';
@@ -148,6 +148,7 @@ async function uploadContentObjects(provider: StorageProvider, localSnapshotDire
     key: storageKey(objectsDirectory, file.sha256),
     sha256: file.sha256,
     displayName: path.posix.basename(file.path),
+    displayPath: storageKey(file.root, file.path),
   }));
   const reconcile = async (items: StorageFileExpectation[]): Promise<Map<string, StorageFileStatus>> => {
     if (provider.reconcileFiles) return provider.reconcileFiles(items, options.signal);
@@ -198,6 +199,17 @@ async function uploadContentObjects(provider: StorageProvider, localSnapshotDire
     }
     options.onProgress?.({ phase: 'verifying', completed: index + 1, total: uniqueFiles.length });
   }
+}
+
+async function syncVisibleFiles(provider: StorageProvider, localSnapshotDirectory: string, manifest: SnapshotManifest, signal?: AbortSignal): Promise<void> {
+  if (!provider.syncVisibleFiles) return;
+  await provider.syncVisibleFiles(manifest.files.map((file): StorageVisibleFileExpectation => ({
+    key: storageKey('SoloSync', manifest.projectId, 'objects', file.sha256),
+    sha256: file.sha256,
+    displayName: path.posix.basename(file.path),
+    displayPath: storageKey(file.root, file.path),
+    source: path.join(localSnapshotDirectory, 'files', file.root, ...file.path.split('/')),
+  })), manifest.projectId, manifest.snapshotId, signal);
 }
 
 async function uploadDirectory(provider: StorageProvider, localDirectory: string, remoteDirectory: string, signal?: AbortSignal, root = true): Promise<void> {
@@ -381,6 +393,7 @@ export class SnapshotRepository {
           const remote = storedFileKey(readyManifest, file);
           if (await options.provider.hashFile(remote, options.signal) !== file.sha256) throw new Error(`The published copy of ${file.path} failed verification.`);
         }
+        await syncVisibleFiles(options.provider, localSnapshotDirectory, readyManifest, options.signal);
         published = true;
         await updatePendingState('committed');
         options.onProgress?.({ phase: 'complete', total: readyManifest.files.length, durationMs: Date.now() - startedAt });
@@ -418,6 +431,7 @@ export class SnapshotRepository {
       options.onProgress?.({ phase: 'publishing' });
       await options.provider.move(stagingDirectory, finalDirectory, options.signal);
       remoteCommitted = true;
+      await syncVisibleFiles(options.provider, localSnapshotDirectory, readyManifest, options.signal);
       await updatePendingState('committed');
       const previousProject = await readProject(options.provider, options.projectId, options.signal);
       const project: BackupProject = {

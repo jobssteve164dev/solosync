@@ -49,6 +49,12 @@ class MemoryDriveApi {
       && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value));
   }
 
+  async listFiles(properties = {}) {
+    this.calls.push('listFiles');
+    return [...this.items.values()].filter((item) => !item.trashed && item.mimeType !== 'application/vnd.google-apps.folder'
+      && Object.entries(properties).every(([key, value]) => item.appProperties[key] === value));
+  }
+
   async createFolder(item) {
     this.calls.push('createFolder');
     if (this.items.has(item.id)) throw new Error('already exists');
@@ -63,6 +69,23 @@ class MemoryDriveApi {
     const created = { ...item, mimeType: 'application/octet-stream', size: String(content.length), sha256Checksum: createHash('sha256').update(content).digest('hex'), content, createdTime: new Date(this.sequence * 1000).toISOString(), trashed: false };
     this.items.set(item.id, created);
     return created;
+  }
+
+  async replaceFile(item, source) {
+    this.calls.push('replaceFile');
+    const existing = this.items.get(item.id);
+    if (!existing || existing.trashed) throw new Error('not found');
+    const content = Buffer.isBuffer(source) ? source : await readFile(source);
+    const replaced = {
+      ...existing,
+      ...item,
+      mimeType: 'application/octet-stream',
+      size: String(content.length),
+      sha256Checksum: createHash('sha256').update(content).digest('hex'),
+      content,
+    };
+    this.items.set(item.id, replaced);
+    return replaced;
   }
 
   async get(id) { this.calls.push('get'); return this.items.get(id); }
@@ -124,7 +147,7 @@ test('completes empty and small snapshots within a 30-second one-second-RTT budg
 
   assert.equal(empty.files.length, 0);
   const emptyRemoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(emptyRemoteCalls <= 21, `expected a new empty snapshot to use at most 21 Drive requests, received ${emptyRemoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(emptyRemoteCalls <= 25, `expected a new empty snapshot to use at most 25 Drive requests, received ${emptyRemoteCalls}: ${JSON.stringify(api.calls)}`);
 
   await writeFile(source, 'x');
   api.calls = [];
@@ -142,7 +165,7 @@ test('completes empty and small snapshots within a 30-second one-second-RTT budg
   });
   assert.equal(manifest.files.length, 1);
   const remoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(remoteCalls <= 8, `expected a changed small-file snapshot to use at most 8 Drive requests, received ${remoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(remoteCalls <= 23, `expected a changed small-file snapshot to use at most 23 Drive requests, received ${remoteCalls}: ${JSON.stringify(api.calls)}`);
 
   api.calls = [];
   const repeated = await repository.create({
@@ -158,9 +181,11 @@ test('completes empty and small snapshots within a 30-second one-second-RTT budg
     git: { dirty: true },
   });
   assert.equal(repeated.files[0].sha256, manifest.files[0].sha256);
+  const repeatedCurrent = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(repeatedCurrent.appProperties.snapshotId, repeated.snapshotId, 'an unchanged current file should still converge to the latest committed snapshot');
   assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 1, 'an unchanged snapshot should upload only its manifest');
   const repeatedRemoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(repeatedRemoteCalls <= 6, `expected an unchanged snapshot to use at most 6 Drive requests, received ${repeatedRemoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(repeatedRemoteCalls <= 11, `expected an unchanged snapshot to use at most 11 Drive requests, received ${repeatedRemoteCalls}: ${JSON.stringify(api.calls)}`);
   assert.equal(api.calls.filter((call) => call === 'hashFile').length, 0, 'Drive SHA-256 metadata should avoid downloading unchanged objects');
 });
 
@@ -237,11 +262,10 @@ test('reuses a recent root validation during the same connection', async () => {
   assert.deepEqual(api.calls, []);
 });
 
-test('keeps the original file name and extension for visible Drive objects', async (t) => {
+test('keeps the original file name and extension for the visible current Drive file', async (t) => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-visible-name-'));
   const source = path.join(temp, 'project-notes.md');
   const contents = Buffer.from('# Notes\n');
-  const sha256 = createHash('sha256').update(contents).digest('hex');
   await writeFile(source, contents);
   t.after(async () => {
     await unlink(source);
@@ -249,12 +273,455 @@ test('keeps the original file name and extension for visible Drive objects', asy
   });
   const api = new MemoryDriveApi();
   const provider = await GoogleDriveProvider.connect(api);
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'visible-name',
+    projectName: 'Visible Name',
+    roots: [{ name: 'workspace', path: temp }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Visible name',
+    git: { dirty: true },
+  });
 
-  await provider.writeFile(`SoloSync/visible-name/objects/${sha256}`, source);
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.name, 'project-notes.md');
+  assert.equal(current.content.toString(), contents.toString());
+});
 
-  const object = [...api.items.values()].find((item) => item.appProperties.role === 'object');
-  assert.equal(object.name, 'project-notes.md');
-  assert.equal(object.appProperties.contentSha256, sha256);
+test('replaces the visible Drive file when the same source path changes and keeps both snapshots restorable', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-visible-replacement-'));
+  const workspace = path.join(temp, 'workspace');
+  const pending = path.join(temp, 'pending');
+  const restoredFirst = path.join(temp, 'restored-first');
+  const restoredSecond = path.join(temp, 'restored-second');
+  const restoredThird = path.join(temp, 'restored-third');
+  await mkdir(workspace);
+  const source = path.join(workspace, 'source.txt');
+  await writeFile(source, 'first');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'visible-replacement',
+    projectName: 'Visible Replacement',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Visible replacement',
+    git: { dirty: true },
+  };
+
+  const first = await repository.create(options);
+  const firstVisible = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const stableVisibleId = firstVisible.id;
+  await writeFile(source, 'second');
+  api.calls = [];
+  const second = await repository.create(options);
+  const replacementCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
+  assert.ok(replacementCalls <= 15, `expected a first visible replacement to use at most 15 Drive requests, received ${replacementCalls}: ${JSON.stringify(api.calls)}`);
+
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'visible-replacement');
+  const visible = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current' && item.name === 'source.txt');
+  const versionFolder = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'version-history');
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].id, stableVisibleId);
+  assert.equal(visible[0].content.toString(), 'second');
+  assert.ok(versionFolder);
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.parents.includes(versionFolder.id) && item.appProperties.role === 'object').length, 2);
+
+  await writeFile(source, 'first');
+  api.calls = [];
+  const third = await repository.create(options);
+  const reusedVersionCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
+  assert.ok(reusedVersionCalls <= 12, `expected reusing a previous version to use at most 12 Drive requests, received ${reusedVersionCalls}: ${JSON.stringify(api.calls)}`);
+  const visibleAfterReuse = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current' && item.name === 'source.txt');
+  assert.equal(visibleAfterReuse.length, 1);
+  assert.equal(visibleAfterReuse[0].id, stableVisibleId);
+  assert.equal(visibleAfterReuse[0].content.toString(), 'first');
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.parents.includes(versionFolder.id) && item.appProperties.role === 'object').length, 2);
+
+  await repository.restoreAll(provider, first, restoredFirst);
+  await repository.restoreAll(provider, second, restoredSecond);
+  await repository.restoreAll(provider, third, restoredThird);
+  assert.equal(await readFile(path.join(restoredFirst, 'workspace', 'source.txt'), 'utf8'), 'first');
+  assert.equal(await readFile(path.join(restoredSecond, 'workspace', 'source.txt'), 'utf8'), 'second');
+  assert.equal(await readFile(path.join(restoredThird, 'workspace', 'source.txt'), 'utf8'), 'first');
+});
+
+test('keeps one visible current file per source path when different paths have identical contents', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-same-content-paths-'));
+  const workspace = path.join(temp, 'workspace');
+  const pending = path.join(temp, 'pending');
+  await mkdir(path.join(workspace, 'a'), { recursive: true });
+  await mkdir(path.join(workspace, 'b'), { recursive: true });
+  await writeFile(path.join(workspace, 'a', 'config.json'), 'A');
+  await writeFile(path.join(workspace, 'b', 'config.json'), 'B');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'same-content-paths',
+    projectName: 'Same Content Paths',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Same content paths',
+    git: { dirty: true },
+  };
+
+  await repository.create(options);
+  await writeFile(path.join(workspace, 'a', 'config.json'), 'B');
+  await repository.create(options);
+
+  const current = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.deepEqual(current.map((item) => item.name).sort(), ['config.json', 'config.json']);
+  assert.equal(new Set(current.map((item) => item.appProperties.sourcePathHash)).size, 2);
+  assert.equal(new Set(current.map((item) => item.parents[0])).size, 2);
+  assert.deepEqual(current.map((item) => api.items.get(item.parents[0]).name).sort(), ['a', 'b']);
+  assert.ok(current.every((item) => item.content.toString() === 'B'));
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'object').length, 2);
+});
+
+test('removes the visible current file when its source path is deleted without removing restore history', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-deleted-current-'));
+  const workspace = path.join(temp, 'workspace');
+  const source = path.join(workspace, 'deleted.txt');
+  await mkdir(workspace);
+  await writeFile(source, 'keep in history');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'deleted-current',
+    projectName: 'Deleted Current',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Deleted current',
+    git: { dirty: true },
+  };
+
+  const first = await repository.create(options);
+  await unlink(source);
+  await repository.create(options);
+
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current').length, 0);
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'object').length, 1);
+  const restored = path.join(temp, 'restored');
+  await repository.restoreAll(provider, first, restored);
+  assert.equal(await readFile(path.join(restored, 'workspace', 'deleted.txt'), 'utf8'), 'keep in history');
+});
+
+test('keeps the previous visible file when an in-place Drive replacement fails', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-replace-failure-'));
+  const workspace = path.join(temp, 'workspace');
+  const source = path.join(workspace, 'source.txt');
+  await mkdir(workspace);
+  await writeFile(source, 'before');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'replace-failure',
+    projectName: 'Replace Failure',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Replace failure',
+    git: { dirty: true },
+  };
+  await repository.create(options);
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const stableId = current.id;
+  await writeFile(source, 'after');
+  api.replaceFile = async () => { throw new Error('replacement failed'); };
+
+  await assert.rejects(repository.create(options), /replacement failed/);
+
+  const visible = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].id, stableId);
+  assert.equal(visible[0].content.toString(), 'before');
+  assert.equal((await repository.list(provider, 'replace-failure')).length, 2, 'the snapshot is committed before the optional current-file view is updated');
+});
+
+test('does not change the visible current file when publishing the new snapshot fails', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-publish-failure-'));
+  const workspace = path.join(temp, 'workspace');
+  const source = path.join(workspace, 'source.txt');
+  await mkdir(workspace);
+  await writeFile(source, 'published');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'publish-failure',
+    projectName: 'Publish Failure',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Publish failure',
+    git: { dirty: true },
+  };
+  await repository.create(options);
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const stableId = current.id;
+  await writeFile(source, 'not published');
+  provider.move = async () => { throw new Error('publish failed'); };
+
+  await assert.rejects(repository.create(options), /publish failed/);
+
+  const visible = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].id, stableId);
+  assert.equal(visible[0].content.toString(), 'published');
+  assert.equal((await repository.list(provider, 'publish-failure')).length, 1);
+});
+
+test('does not let an older committed snapshot overwrite a newer current file', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-current-order-'));
+  const olderSource = path.join(temp, 'older.txt');
+  const newerSource = path.join(temp, 'newer.txt');
+  await writeFile(olderSource, 'older');
+  await writeFile(newerSource, 'newer');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const olderProvider = await GoogleDriveProvider.connect(api);
+  const newerProvider = await GoogleDriveProvider.connect(api);
+  const projectId = 'current-order';
+  const olderSnapshot = '2026-01-01T00-00-00-000Z_old';
+  const newerSnapshot = '2026-01-01T00-00-01-000Z_new';
+  for (const [provider, snapshotId] of [[olderProvider, olderSnapshot], [newerProvider, newerSnapshot]]) {
+    const staging = `SoloSync/${projectId}/staging/${snapshotId}`;
+    await provider.createDirectory(staging);
+    await provider.writeFile(`${staging}/manifest.json`, Buffer.from(JSON.stringify({ snapshotId })));
+    await provider.move(staging, `SoloSync/${projectId}/snapshots/${snapshotId}`);
+  }
+  const sha = (value) => createHash('sha256').update(value).digest('hex');
+  const olderFile = [{ key: `SoloSync/${projectId}/objects/${sha('older')}`, sha256: sha('older'), displayName: 'source.txt', displayPath: 'workspace/source.txt', source: olderSource }];
+  const newerFile = [{ key: `SoloSync/${projectId}/objects/${sha('newer')}`, sha256: sha('newer'), displayName: 'source.txt', displayPath: 'workspace/source.txt', source: newerSource }];
+
+  await newerProvider.syncVisibleFiles(newerFile, projectId, newerSnapshot);
+  await olderProvider.syncVisibleFiles(olderFile, projectId, olderSnapshot);
+
+  const current = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.length, 1);
+  assert.equal(current[0].content.toString(), 'newer');
+  assert.equal(current[0].appProperties.snapshotId, newerSnapshot);
+});
+
+test('converges to the newest committed file when an older replacement finishes last', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-current-race-'));
+  const olderSource = path.join(temp, 'older.txt');
+  const newerSource = path.join(temp, 'newer.txt');
+  await writeFile(olderSource, 'older');
+  await writeFile(newerSource, 'newer');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const olderProvider = await GoogleDriveProvider.connect(api);
+  const newerProvider = await GoogleDriveProvider.connect(api);
+  const projectId = 'current-race';
+  const olderSnapshot = '2026-01-01T00-00-00-000Z_old';
+  const newerSnapshot = '2026-01-01T00-00-01-000Z_new';
+  const sha = (value) => createHash('sha256').update(value).digest('hex');
+
+  async function commit(provider, snapshotId, value, source) {
+    const digest = sha(value);
+    const objectKey = `SoloSync/${projectId}/objects/${digest}`;
+    await provider.writeFile(objectKey, source);
+    const staging = `SoloSync/${projectId}/staging/${snapshotId}`;
+    await provider.createDirectory(staging);
+    await provider.writeFile(`${staging}/manifest.json`, Buffer.from(JSON.stringify({
+      formatVersion: 2,
+      snapshotId,
+      projectId,
+      projectName: 'Current Race',
+      createdAt: new Date().toISOString(),
+      reason: 'Concurrency regression',
+      git: { dirty: true },
+      roots: ['workspace'],
+      files: [{ root: 'workspace', path: 'source.txt', size: Buffer.byteLength(value), sha256: digest }],
+      totalBytes: Buffer.byteLength(value),
+    })));
+    await provider.move(staging, `SoloSync/${projectId}/snapshots/${snapshotId}`);
+    return [{ key: objectKey, sha256: digest, displayName: 'source.txt', displayPath: 'workspace/source.txt', source }];
+  }
+
+  const olderFiles = await commit(olderProvider, olderSnapshot, 'older', olderSource);
+  await olderProvider.syncVisibleFiles(olderFiles, projectId, olderSnapshot);
+
+  const originalReplace = api.replaceFile.bind(api);
+  let releaseOlderReplacement;
+  let olderReplacementStarted;
+  const olderReplacementGate = new Promise((resolve) => { releaseOlderReplacement = resolve; });
+  const olderReplacementEntered = new Promise((resolve) => { olderReplacementStarted = resolve; });
+  let intercepted = false;
+  api.replaceFile = async (item, source) => {
+    const content = Buffer.isBuffer(source) ? source : await readFile(source);
+    if (!intercepted && content.toString() === 'older-again') {
+      intercepted = true;
+      olderReplacementStarted();
+      await olderReplacementGate;
+    }
+    return originalReplace(item, source);
+  };
+
+  await writeFile(olderSource, 'older-again');
+  const lateOlderSnapshot = '2026-01-01T00-00-02-000Z_old';
+  const lateOlderFiles = await commit(olderProvider, lateOlderSnapshot, 'older-again', olderSource);
+  const lateOlderSync = olderProvider.syncVisibleFiles(lateOlderFiles, projectId, lateOlderSnapshot);
+  await olderReplacementEntered;
+
+  const newestSnapshot = '2026-01-01T00-00-03-000Z_new';
+  const newerFiles = await commit(newerProvider, newestSnapshot, 'newer', newerSource);
+  await newerProvider.syncVisibleFiles(newerFiles, projectId, newestSnapshot);
+  releaseOlderReplacement();
+  await lateOlderSync;
+
+  const current = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.length, 1);
+  assert.equal(current[0].content.toString(), 'newer');
+  assert.equal(current[0].appProperties.snapshotId, newestSnapshot);
+});
+
+test('keeps the stable current file ID when an older deletion finishes after a newer replacement', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-delete-race-'));
+  const source = path.join(temp, 'source.txt');
+  await writeFile(source, 'initial');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const deletingProvider = await GoogleDriveProvider.connect(api);
+  const updatingProvider = await GoogleDriveProvider.connect(api);
+  const projectId = 'delete-race';
+  const sha = (value) => createHash('sha256').update(value).digest('hex');
+
+  async function commit(provider, snapshotId, value) {
+    const files = [];
+    if (value !== undefined) {
+      const digest = sha(value);
+      const objectKey = `SoloSync/${projectId}/objects/${digest}`;
+      await provider.writeFile(objectKey, source);
+      files.push({ root: 'workspace', path: 'source.txt', size: Buffer.byteLength(value), sha256: digest });
+    }
+    const staging = `SoloSync/${projectId}/staging/${snapshotId}`;
+    await provider.createDirectory(staging);
+    await provider.writeFile(`${staging}/manifest.json`, Buffer.from(JSON.stringify({
+      formatVersion: 2,
+      snapshotId,
+      projectId,
+      projectName: 'Delete Race',
+      createdAt: new Date().toISOString(),
+      reason: 'Concurrency regression',
+      git: { dirty: true },
+      roots: ['workspace'],
+      files,
+      totalBytes: value === undefined ? 0 : Buffer.byteLength(value),
+    })));
+    await provider.move(staging, `SoloSync/${projectId}/snapshots/${snapshotId}`);
+    return files.map((file) => ({
+      key: `SoloSync/${projectId}/objects/${file.sha256}`,
+      sha256: file.sha256,
+      displayName: file.path,
+      displayPath: `${file.root}/${file.path}`,
+      source,
+    }));
+  }
+
+  const initialSnapshot = '2026-01-01T00-00-00-000Z_initial';
+  await deletingProvider.syncVisibleFiles(await commit(deletingProvider, initialSnapshot, 'initial'), projectId, initialSnapshot);
+  const stableId = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current').id;
+
+  const originalTrash = api.trash.bind(api);
+  let releaseDeletion;
+  let deletionStarted;
+  const deletionGate = new Promise((resolve) => { releaseDeletion = resolve; });
+  const deletionEntered = new Promise((resolve) => { deletionStarted = resolve; });
+  api.trash = async (id) => {
+    if (id === stableId) {
+      deletionStarted();
+      await deletionGate;
+    }
+    return originalTrash(id);
+  };
+
+  const deletionSnapshot = '2026-01-01T00-00-01-000Z_delete';
+  await commit(deletingProvider, deletionSnapshot, undefined);
+  const deletion = deletingProvider.syncVisibleFiles([], projectId, deletionSnapshot);
+  await deletionEntered;
+
+  await writeFile(source, 'newer');
+  const newerSnapshot = '2026-01-01T00-00-02-000Z_newer';
+  await updatingProvider.syncVisibleFiles(await commit(updatingProvider, newerSnapshot, 'newer'), projectId, newerSnapshot);
+  releaseDeletion();
+  await deletion;
+
+  const current = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, stableId);
+  assert.equal(current[0].content.toString(), 'newer');
+  assert.equal(current[0].appProperties.snapshotId, newerSnapshot);
+});
+
+test('cleans up duplicate visible names created by version 0.0.12 without reuploading retained content', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-visible-migration-'));
+  const workspace = path.join(temp, 'workspace');
+  const pending = path.join(temp, 'pending');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'new');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  await provider.createDirectory('SoloSync/visible-migration/objects');
+  const project = [...api.items.values()].find((item) => item.appProperties.role === 'project' && item.appProperties.projectId === 'visible-migration');
+  for (const [id, content] of [['legacy-old', 'old'], ['legacy-new', 'new']]) {
+    const digest = createHash('sha256').update(content).digest('hex');
+    const key = `SoloSync/visible-migration/objects/${digest}`;
+    await api.uploadFile({
+      id,
+      name: 'source.txt',
+      parents: [project.id],
+      appProperties: {
+        product: 'solosync', role: 'object', format: '1', projectId: 'visible-migration',
+        logicalKeyHash: createHash('sha256').update(key).digest('hex'), contentSha256: digest,
+      },
+    }, Buffer.from(content));
+  }
+  api.calls = [];
+
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'visible-migration',
+    projectName: 'Visible Migration',
+    roots: [{ name: 'workspace', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    pendingDirectory: pending,
+    pendingDestinationIdentity: provider.destinationIdentity,
+    reason: 'Migrate duplicate names',
+    git: { dirty: true },
+  });
+
+  const visible = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current' && item.name === 'source.txt');
+  const versions = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'version-history');
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].content.toString(), 'new');
+  assert.equal([...api.items.values()].filter((item) => !item.trashed && item.parents.includes(versions.id) && item.appProperties.role === 'object').length, 2);
+  assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 2, 'migration should create one current file and one compact snapshot record');
 });
 
 test('explicit file verification reads current Drive content instead of trusting cached checksum metadata', async (t) => {
@@ -321,8 +788,10 @@ test('renames legacy hash-named objects without uploading their contents again',
     git: { dirty: true },
   });
 
-  assert.equal(legacy.name, 'release-notes.txt');
-  assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 1, 'only the manifest should be uploaded');
+  assert.equal(legacy.name, `release-notes.${sha256.slice(0, 8)}.txt`);
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.name, 'release-notes.txt');
+  assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 2, 'migration should create the current file and compact snapshot record');
 });
 
 test('checks all unchanged objects with one Drive listing after reconnecting', async (t) => {
@@ -370,7 +839,7 @@ test('checks all unchanged objects with one Drive listing after reconnecting', a
   });
 
   const remoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(remoteCalls <= 14, `expected reconnect plus one object listing and a fixed publish path to use at most 14 Drive requests, received ${remoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(remoteCalls <= 22, `expected reconnect plus one object listing and a fixed publish path to use at most 22 Drive requests, received ${remoteCalls}: ${JSON.stringify(api.calls)}`);
   assert.equal(api.calls.filter((call) => call === 'hashFile').length, 0);
 });
 
@@ -402,7 +871,7 @@ test('does not publish when a reused object changes while another object is uplo
   const originalUpload = api.uploadFile.bind(api);
   api.uploadFile = async (item, source) => {
     const uploaded = await originalUpload(item, source);
-    if (item.appProperties.role === 'object' && item.name === 'new.txt') {
+    if (item.appProperties.role === 'object' && item.appProperties.contentSha256 === createHash('sha256').update('new').digest('hex')) {
       existing.content = Buffer.from('changed remotely');
       existing.sha256Checksum = createHash('sha256').update(existing.content).digest('hex');
     }
@@ -421,10 +890,10 @@ test('verifies a newly uploaded Drive object by stable ID when the next object l
   await writeFile(path.join(workspace, 'source.txt'), 'source');
   t.after(() => removeTreePrecisely(temp));
   const api = new MemoryDriveApi();
-  const originalListChildren = api.listChildren.bind(api);
+  const originalListFiles = api.listFiles.bind(api);
   let objectLists = 0;
-  api.listChildren = async (parentId, properties = {}) => {
-    const result = await originalListChildren(parentId, properties);
+  api.listFiles = async (properties = {}) => {
+    const result = await originalListFiles(properties);
     if (properties.role !== 'object') return result;
     objectLists += 1;
     return objectLists === 2 ? [] : result;
@@ -485,7 +954,7 @@ test('repairs identical corrupt duplicate objects before publishing', async (t) 
   const objects = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'object');
   assert.equal(objects.length, 1);
   assert.equal(objects[0].sha256Checksum, manifest.files[0].sha256);
-  assert.equal(objects[0].name, 'repair.txt');
+  assert.equal(objects[0].name, `repair.${sha256.slice(0, 8)}.txt`);
 });
 
 test('keeps legacy snapshot folders readable without physical staging or snapshots containers', async () => {

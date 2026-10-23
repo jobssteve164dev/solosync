@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.13
+
+- Replace the visible Google Drive file when the same source path changes instead of leaving multiple current files with the same name.
+- Keep immutable restore contents inside the single `Backup History/Previous File Versions` folder while updating a separate, stable current-file ID in place.
+- Mirror workspace-relative directories so distinct source paths stay separate even when they share a name or identical bytes, and migrate the duplicate visible objects created by 0.0.12 into file history.
+- Update the readable current view only after snapshot publication, and converge it back to the newest committed snapshot when connected clients finish overlapping replacements out of order.
+- Preserve the sub-30-request target with at most 23 Drive requests for a changed small-file snapshot in the single-page test model.
+
 ## 0.0.12
 
 - Keep each Google Drive content object's original file name and extension visible while retaining SHA-256 as its stable incremental identity.
