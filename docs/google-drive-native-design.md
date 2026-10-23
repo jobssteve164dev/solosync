@@ -108,12 +108,13 @@ SoloSync Backups/
     Previous File Versions/         role=version-history, format=2（全局唯一）
       <name>.<hash-prefix>.<ext>    role=object（不可变恢复内容）
   <project-name>/                   role=project, projectId=...
-    <workspace-root>/               role=current-directory
+    <relative-path>/                role=current-directory（单根项目直接从相对路径开始）
+      <original-file-name.ext>      role=current, contentSha256=..., sourcePathHash=...（当前内容）
+    <workspace-root>/               role=current-directory（仅多根项目保留根名称）
       <relative-path>/              role=current-directory
-        <original-file-name.ext>    role=current, contentSha256=..., sourcePathHash=...（当前内容）
 ```
 
-`objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。不可变 object 从创建起就位于 `Backup History/Previous File Versions`，相同内容只保存一份并供所有历史快照恢复。project folder 里的 `current` 是独立的用户可读副本，并按 workspace root 与相对目录建立 `current-directory`，所以不同路径的同名文件不会被压平到一个目录。每个来源路径使用一个稳定 Drive ID，内容变化在 snapshot 发布后通过 `files.update` 原位替换，不新增同名当前文件。新快照 manifest 直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。`sourcePathHash` 只标识当前副本对应的来源路径；同内容的不同路径不会被折叠。0.0.12 留在 project folder 的 object 会在下次备份迁移进文件历史。旧 format-1 snapshot 目录保持可读、可校验和可恢复。
+`objects/<sha256>`、`staging/<snapshot-id>/manifest.json` 与 `snapshots/<snapshot-id>/manifest.json` 都是 provider 的虚拟 key。不可变 object 从创建起就位于 `Backup History/Previous File Versions`，相同内容只保存一份并供所有历史快照恢复。project folder 里的 `current` 是独立的用户可读副本：单根项目直接镜像根内相对路径，多根项目才保留各 workspace root 名称，所以既不重复单一根目录，也不会让不同根的同名路径冲突。来源身份仍由完整 root + 相对路径计算，布局迁移不会改变稳定 Drive ID。内容变化在 snapshot 发布后通过 `files.update` 原位替换，不新增同名当前文件。新快照 manifest 直接映射成 `Backup History` 下带时间与 ID 的单个 JSON record，不再为每次自动备份创建目录，也不再反复出现同名 `manifest.json`。0.0.13 的冗余单根目录在下次备份时整体移动到 `Backup History` 并标记为旧布局，目录中任何额外内容都会原样保留，不根据当前权限范围内的“空目录”判断执行删除。0.0.12 留在 project folder 的 object 会在下次备份迁移进文件历史。旧 format-1 snapshot 目录保持可读、可校验和可恢复。
 
 根文件夹 ID 存入 `globalState`。即使用户在 Drive 中重命名或移动文件夹，SoloSync 仍按稳定 ID 访问。若 ID 不可用，则按 app-private `appProperties` 搜索；找不到时提示用户重新创建，不静默改用同名陌生文件夹。
 
@@ -244,7 +245,7 @@ src/sensitiveFileReview.ts  云端备份前的敏感文件扫描与排除决策
 - “断开此设备”不影响另一台已登录设备；“撤销全部授权”经确认后让所有设备在下次访问时进入“需要重新登录”，两者都不删除备份。
 - 令牌刷新、`invalid_grant`、Workspace 管理员拒绝、403 两类限流、429、5xx、上传响应丢失、上传 session 过期、扩展重启和主动取消均有自动化测试。
 - 模拟同名对象、两台设备同时创建根/项目目录和同时为同一项目备份：不能任意选择重复对象，项目目录最终收敛到 canonical ID，两个有效 snapshot 都可发现，冲突对象不能被覆盖或删除。
-- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder 与唯一历史目录；单页且无节流时，包含首次连接的全新空项目最多使用 25 个远端请求，活跃连接上的一个变化小文件最多 23 个，重复未修改快照最多 11 个，重连后执行未修改快照最多 22 个。
+- 全新账号第一次备份时，即使仓库只调用虚拟 `objects`/`staging`/`snapshots` 容器，也会自动建立唯一 canonical project folder 与唯一历史目录；单页且无节流时，包含首次连接、目录创建和一次性布局标记的全新空项目最多使用 26 个远端请求，活跃连接上的一个变化小文件最多 23 个，重复未修改快照最多 12 个，重连后执行未修改快照最多 22 个。
 - 更新既有 current 最多使用 15 个远端请求；变化回历史中已有内容时最多 12 个，仍低于 30 次链路预算。
 - Drive 项目目录里的 current 显示原文件名与扩展名；不可变历史 object 使用文件名加短哈希避免历史目录里的同名混淆。
 - Drive backend 不创建或依赖 `project.json`；项目列表、最近时间、历史与新设备恢复从 committed history records 与旧版 committed snapshot folders 合并派生。

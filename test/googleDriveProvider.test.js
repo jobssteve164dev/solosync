@@ -147,7 +147,7 @@ test('completes empty and small snapshots within a 30-second one-second-RTT budg
 
   assert.equal(empty.files.length, 0);
   const emptyRemoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(emptyRemoteCalls <= 25, `expected a new empty snapshot to use at most 25 Drive requests, received ${emptyRemoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(emptyRemoteCalls <= 26, `expected a new empty snapshot to use at most 26 Drive requests, received ${emptyRemoteCalls}: ${JSON.stringify(api.calls)}`);
 
   await writeFile(source, 'x');
   api.calls = [];
@@ -185,7 +185,7 @@ test('completes empty and small snapshots within a 30-second one-second-RTT budg
   assert.equal(repeatedCurrent.appProperties.snapshotId, repeated.snapshotId, 'an unchanged current file should still converge to the latest committed snapshot');
   assert.equal(api.calls.filter((call) => call === 'uploadFile').length, 1, 'an unchanged snapshot should upload only its manifest');
   const repeatedRemoteCalls = api.calls.filter((call) => call !== 'forgetUpload').length;
-  assert.ok(repeatedRemoteCalls <= 11, `expected an unchanged snapshot to use at most 11 Drive requests, received ${repeatedRemoteCalls}: ${JSON.stringify(api.calls)}`);
+  assert.ok(repeatedRemoteCalls <= 12, `expected an unchanged snapshot to use at most 12 Drive requests, received ${repeatedRemoteCalls}: ${JSON.stringify(api.calls)}`);
   assert.equal(api.calls.filter((call) => call === 'hashFile').length, 0, 'Drive SHA-256 metadata should avoid downloading unchanged objects');
 });
 
@@ -287,6 +287,271 @@ test('keeps the original file name and extension for the visible current Drive f
   const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
   assert.equal(current.name, 'project-notes.md');
   assert.equal(current.content.toString(), contents.toString());
+});
+
+test('does not repeat the workspace root folder inside a single-root project folder', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-single-root-layout-'));
+  const workspace = path.join(temp, 'BACKUP');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'single-root-layout',
+    projectName: 'BACKUP',
+    roots: [{ name: 'BACKUP', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Single-root layout',
+    git: { dirty: true },
+  });
+
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'single-root-layout');
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const repeatedRoot = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current-directory' && item.name === 'BACKUP');
+  assert.deepEqual(current.parents, [project.id]);
+  assert.equal(repeatedRoot.length, 0);
+});
+
+test('keeps a legitimate top-level folder that has the same name as the single workspace root', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-same-name-child-'));
+  const workspace = path.join(temp, 'BACKUP');
+  const sameNameChild = path.join(workspace, 'BACKUP');
+  await mkdir(workspace);
+  await mkdir(sameNameChild);
+  await writeFile(path.join(sameNameChild, 'nested.txt'), 'nested');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'same-name-child',
+    projectName: 'BACKUP',
+    roots: [{ name: 'BACKUP', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Same-name child layout',
+    git: { dirty: true },
+  });
+
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'same-name-child');
+  const directory = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current-directory' && item.name === 'BACKUP');
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.deepEqual(directory.parents, [project.id]);
+  assert.deepEqual(current.parents, [directory.id]);
+  assert.equal(current.name, 'nested.txt');
+});
+
+test('moves current files out of the redundant v0.0.13 root folder and safely archives the old folder', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-single-root-migration-'));
+  const workspace = path.join(temp, 'BACKUP');
+  await mkdir(workspace);
+  await writeFile(path.join(workspace, 'source.txt'), 'source');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'single-root-migration',
+    projectName: 'BACKUP',
+    roots: [{ name: 'BACKUP', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Single-root migration',
+    git: { dirty: true },
+  };
+  await repository.create(options);
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'single-root-migration');
+  delete project.appProperties.currentLayout;
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const redundantRoot = await api.createFolder({
+    id: 'redundant-workspace-root',
+    name: 'BACKUP',
+    parents: [project.id],
+    appProperties: {
+      product: 'solosync',
+      role: 'current-directory',
+      format: '1',
+      projectId: 'single-root-migration',
+      sourcePathHash: createHash('sha256').update('BACKUP').digest('hex'),
+    },
+  });
+  await api.update(current.id, { addParent: redundantRoot.id, removeParent: project.id });
+  const userFile = await api.uploadFile({
+    id: 'user-file-inside-old-layout',
+    name: 'keep-me.txt',
+    parents: [redundantRoot.id],
+    appProperties: {},
+  }, Buffer.from('user content'));
+
+  await repository.create(options);
+
+  const migrated = api.items.get(current.id);
+  const archivedRoot = api.items.get(redundantRoot.id);
+  const history = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'history');
+  assert.deepEqual(migrated.parents, [project.id]);
+  assert.equal(archivedRoot.trashed, false);
+  assert.deepEqual(archivedRoot.parents, [history.id]);
+  assert.equal(archivedRoot.name, 'Previous Folder Layout - BACKUP');
+  assert.equal(archivedRoot.appProperties.role, 'archived-current-directory');
+  assert.equal(api.items.get(userFile.id).trashed, false);
+  assert.deepEqual(api.items.get(userFile.id).parents, [archivedRoot.id]);
+});
+
+test('archives the redundant v0.0.13 root folder after all current files were deleted', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-empty-single-root-migration-'));
+  const workspace = path.join(temp, 'BACKUP');
+  const source = path.join(workspace, 'source.txt');
+  await mkdir(workspace);
+  await writeFile(source, 'source');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+  const repository = new SnapshotRepository();
+  const options = {
+    provider,
+    projectId: 'empty-single-root-migration',
+    projectName: 'BACKUP',
+    roots: [{ name: 'BACKUP', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Empty single-root migration',
+    git: { dirty: true },
+  };
+  await repository.create(options);
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'empty-single-root-migration');
+  delete project.appProperties.currentLayout;
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  const redundantRoot = await api.createFolder({
+    id: 'empty-redundant-workspace-root',
+    name: 'BACKUP',
+    parents: [project.id],
+    appProperties: {
+      product: 'solosync',
+      role: 'current-directory',
+      format: '1',
+      projectId: 'empty-single-root-migration',
+      sourcePathHash: createHash('sha256').update('BACKUP').digest('hex'),
+    },
+  });
+  await api.update(current.id, { addParent: redundantRoot.id, removeParent: project.id });
+  await unlink(source);
+
+  await repository.create(options);
+
+  const archivedRoot = api.items.get(redundantRoot.id);
+  const history = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'history');
+  assert.equal(api.items.get(current.id).trashed, true);
+  assert.equal(archivedRoot.trashed, false);
+  assert.deepEqual(archivedRoot.parents, [history.id]);
+  assert.equal(archivedRoot.appProperties.role, 'archived-current-directory');
+});
+
+test('migrates a real v0.0.13 same-name nested path without archiving the new layout folder', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-same-name-migration-'));
+  const workspace = path.join(temp, 'BACKUP');
+  const source = path.join(workspace, 'source.txt');
+  const nestedDirectory = path.join(workspace, 'BACKUP');
+  const nestedSource = path.join(nestedDirectory, 'nested.txt');
+  await mkdir(workspace);
+  await writeFile(source, 'source');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const repository = new SnapshotRepository();
+  const options = {
+    projectId: 'same-name-migration',
+    projectName: 'BACKUP',
+    roots: [{ name: 'BACKUP', path: workspace }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Same-name migration',
+    git: { dirty: true },
+  };
+  const initialProvider = await GoogleDriveProvider.connect(api);
+  await repository.create({ ...options, provider: initialProvider });
+  const project = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'project' && item.appProperties.projectId === 'same-name-migration');
+  const current = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'current');
+  delete project.appProperties.currentLayout;
+  const legacyRoot = await api.createFolder({
+    id: 'same-name-legacy-root',
+    name: 'BACKUP',
+    parents: [project.id],
+    appProperties: {
+      product: 'solosync', role: 'current-directory', format: '1', projectId: 'same-name-migration',
+      sourcePathHash: createHash('sha256').update('BACKUP').digest('hex'),
+    },
+  });
+  const legacyRelativeDirectory = await api.createFolder({
+    id: 'same-name-legacy-relative-directory',
+    name: 'BACKUP',
+    parents: [legacyRoot.id],
+    appProperties: {
+      product: 'solosync', role: 'current-directory', format: '1', projectId: 'same-name-migration',
+      sourcePathHash: createHash('sha256').update('BACKUP/BACKUP').digest('hex'),
+    },
+  });
+  await api.update(current.id, {
+    name: 'nested.txt',
+    appProperties: {
+      ...current.appProperties,
+      sourcePathHash: createHash('sha256').update('BACKUP/BACKUP/nested.txt').digest('hex'),
+    },
+    addParent: legacyRelativeDirectory.id,
+    removeParent: project.id,
+  });
+  await unlink(source);
+  await mkdir(nestedDirectory);
+  await writeFile(nestedSource, 'source');
+
+  const upgradedProvider = await GoogleDriveProvider.connect(api);
+  await repository.create({ ...options, provider: upgradedProvider });
+
+  const migrated = api.items.get(current.id);
+  const currentDirectory = [...api.items.values()].find((item) => !item.trashed
+    && item.appProperties.role === 'current-directory'
+    && item.name === 'BACKUP'
+    && item.parents.includes(project.id));
+  const archivedLegacyRoot = api.items.get(legacyRoot.id);
+  const history = [...api.items.values()].find((item) => !item.trashed && item.appProperties.role === 'history');
+  assert.deepEqual(currentDirectory.parents, [project.id]);
+  assert.deepEqual(migrated.parents, [currentDirectory.id]);
+  assert.equal(migrated.id, current.id);
+  assert.deepEqual(archivedLegacyRoot.parents, [history.id]);
+  assert.equal(archivedLegacyRoot.appProperties.role, 'archived-current-directory');
+});
+
+test('keeps workspace root folders when a project contains multiple roots', async (t) => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'solosync-drive-multi-root-layout-'));
+  const frontend = path.join(temp, 'frontend');
+  const backend = path.join(temp, 'backend');
+  await mkdir(frontend);
+  await mkdir(backend);
+  await writeFile(path.join(frontend, 'config.json'), 'frontend');
+  await writeFile(path.join(backend, 'config.json'), 'backend');
+  t.after(() => removeTreePrecisely(temp));
+  const api = new MemoryDriveApi();
+  const provider = await GoogleDriveProvider.connect(api);
+
+  await new SnapshotRepository().create({
+    provider,
+    projectId: 'multi-root-layout',
+    projectName: 'Multi Root',
+    roots: [{ name: 'frontend', path: frontend }, { name: 'backend', path: backend }],
+    excludes: [],
+    reviewedSensitivePaths: [],
+    reason: 'Multi-root layout',
+    git: { dirty: true },
+  });
+
+  const current = [...api.items.values()].filter((item) => !item.trashed && item.appProperties.role === 'current');
+  assert.equal(current.length, 2);
+  assert.deepEqual(current.map((item) => api.items.get(item.parents[0]).name).sort(), ['backend', 'frontend']);
+  assert.equal(new Set(current.map((item) => item.appProperties.sourcePathHash)).size, 2);
 });
 
 test('replaces the visible Drive file when the same source path changes and keeps both snapshots restorable', async (t) => {

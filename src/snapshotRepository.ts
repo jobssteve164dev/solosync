@@ -203,13 +203,15 @@ async function uploadContentObjects(provider: StorageProvider, localSnapshotDire
 
 async function syncVisibleFiles(provider: StorageProvider, localSnapshotDirectory: string, manifest: SnapshotManifest, signal?: AbortSignal): Promise<void> {
   if (!provider.syncVisibleFiles) return;
+  const showRoot = manifest.roots.length > 1;
   await provider.syncVisibleFiles(manifest.files.map((file): StorageVisibleFileExpectation => ({
     key: storageKey('SoloSync', manifest.projectId, 'objects', file.sha256),
     sha256: file.sha256,
     displayName: path.posix.basename(file.path),
-    displayPath: storageKey(file.root, file.path),
+    displayPath: showRoot ? storageKey(file.root, file.path) : normalizeStorageKey(file.path),
+    sourcePath: storageKey(file.root, file.path),
     source: path.join(localSnapshotDirectory, 'files', file.root, ...file.path.split('/')),
-  })), manifest.projectId, manifest.snapshotId, signal);
+  })), manifest.projectId, manifest.snapshotId, signal, manifest.roots);
 }
 
 async function uploadDirectory(provider: StorageProvider, localDirectory: string, remoteDirectory: string, signal?: AbortSignal, root = true): Promise<void> {

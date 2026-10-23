@@ -19,6 +19,7 @@ export interface StorageFileExpectation {
 export interface StorageVisibleFileExpectation extends StorageFileExpectation {
   displayName: string;
   displayPath: string;
+  sourcePath?: string;
   source: string;
 }
 
@@ -29,7 +30,7 @@ export interface StorageProvider {
   readonly localRoot?: string;
   readonly commitResponseIsAuthoritative?: boolean;
   reconcileFiles?(files: StorageFileExpectation[], signal?: AbortSignal): Promise<Map<string, StorageFileStatus>>;
-  syncVisibleFiles?(files: StorageVisibleFileExpectation[], projectId: string, snapshotId: string, signal?: AbortSignal): Promise<void>;
+  syncVisibleFiles?(files: StorageVisibleFileExpectation[], projectId: string, snapshotId: string, signal?: AbortSignal, rootNames?: string[]): Promise<void>;
   validate(signal?: AbortSignal): Promise<void>;
   testConnection(signal?: AbortSignal): Promise<void>;
   exists(key: string, signal?: AbortSignal): Promise<boolean>;

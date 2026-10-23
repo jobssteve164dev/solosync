@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.14
+
+- Remove the redundant workspace-root folder from the readable Google Drive layout when a project has one backup root.
+- Move existing v0.0.13 current files out of that redundant folder without changing their Drive file IDs, then preserve the old folder and any extra contents inside `Backup History`.
+- Keep named root folders for multi-root projects so equal relative paths remain distinct.
+
 ## 0.0.13
 
 - Replace the visible Google Drive file when the same source path changes instead of leaving multiple current files with the same name.

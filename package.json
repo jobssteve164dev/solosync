@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync",
   "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",

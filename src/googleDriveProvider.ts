@@ -605,17 +605,53 @@ export class GoogleDriveProvider implements StorageProvider {
     return parent;
   }
 
-  async syncVisibleFiles(files: StorageVisibleFileExpectation[], projectId: string, snapshotId: string, signal?: AbortSignal, reconciliationDepth = 0): Promise<void> {
+  private async archiveLegacySingleRootDirectory(project: GoogleDriveItem, projectId: string, rootName: string, signal?: AbortSignal): Promise<void> {
+    const pathHash = visiblePathHash(rootName);
+    const directories = (await this.api.listFolders({ product: 'solosync', role: 'current-directory', projectId, sourcePathHash: pathHash, format: '1' }, signal))
+      .filter((item) => item.parents.includes(project.id));
+    if (directories.length === 0) return;
+    const history = await this.history(true, signal);
+    if (!history) throw new Error('SoloSync could not prepare the Google Drive backup history.');
+    for (const directory of directories) {
+      const archived = await this.api.update(directory.id, {
+        name: `Previous Folder Layout - ${directory.name}`,
+        appProperties: { ...directory.appProperties, role: 'archived-current-directory', archived: '1' },
+        addParent: history.id,
+        removeParent: project.id,
+      }, signal);
+      for (const [key, cached] of this.resolved.entries()) {
+        if (cached?.id === archived.id) this.resolved.delete(key);
+      }
+    }
+  }
+
+  private async reconcileCurrentLayout(project: GoogleDriveItem, projectId: string, rootNames: string[], signal?: AbortSignal): Promise<void> {
+    const layout = rootNames.length === 1
+      ? `single-root-direct:${visiblePathHash(rootNames[0])}`
+      : 'multi-root-named:1';
+    if (project.appProperties.currentLayout === layout) return;
+    if (rootNames.length === 1) await this.archiveLegacySingleRootDirectory(project, projectId, rootNames[0], signal);
+    const updated = await this.api.update(project.id, {
+      appProperties: { ...project.appProperties, currentLayout: layout },
+    }, signal);
+    Object.assign(project, updated);
+    for (const [key, cached] of this.resolved.entries()) {
+      if (cached?.id === updated.id) this.resolved.set(key, updated);
+    }
+  }
+
+  async syncVisibleFiles(files: StorageVisibleFileExpectation[], projectId: string, snapshotId: string, signal?: AbortSignal, rootNames?: string[], reconciliationDepth = 0): Promise<void> {
     const project = await this.project(projectId, true, signal);
     if (!project) throw new Error('SoloSync could not prepare the Google Drive current-file view.');
     const latestCommitted = await this.latestCommittedRecord(projectId, signal);
     if (latestCommitted && latestCommitted.appProperties.snapshotId !== snapshotId) return;
     let current = await this.api.listFiles({ product: 'solosync', role: 'current', projectId, format: '1' }, signal);
+    if (rootNames && rootNames.length > 0) await this.reconcileCurrentLayout(project, projectId, rootNames, signal);
     let requiresConvergenceCheck = false;
     const removedCurrent = new Map<string, GoogleDriveItem>();
-    const expectedPaths = new Set(files.map((file) => visiblePathHash(file.displayPath)));
+    const expectedPaths = new Set(files.map((file) => visiblePathHash(file.sourcePath ?? file.displayPath)));
     for (const file of [...files].sort((left, right) => left.displayPath.localeCompare(right.displayPath))) {
-      const pathHash = visiblePathHash(file.displayPath);
+      const pathHash = visiblePathHash(file.sourcePath ?? file.displayPath);
       const parent = await this.currentParent(project, projectId, file.displayPath, signal);
       let matches = current.filter((item) => item.appProperties.sourcePathHash === pathHash);
       let visible = [...matches].sort((left, right) => (right.appProperties.snapshotId ?? '').localeCompare(left.appProperties.snapshotId ?? '') || left.id.localeCompare(right.id))[0];
@@ -699,6 +735,7 @@ export class GoogleDriveProvider implements StorageProvider {
     if (reconciliationDepth >= 2) throw new Error('Google Drive kept receiving newer snapshots while SoloSync was updating the current-file view. Continue the latest backup to finish reconciliation.');
     if (newestCommitted.appProperties.format !== '2') return;
     const manifest = JSON.parse((await this.api.readFile(newestCommitted.id, signal)).toString('utf8')) as {
+      roots?: string[];
       files?: Array<{ root?: string; path?: string; sha256?: string }>;
     };
     if (!Array.isArray(manifest.files)) throw new Error('The newest Google Drive snapshot manifest is invalid.');
@@ -720,6 +757,7 @@ export class GoogleDriveProvider implements StorageProvider {
     const temporaryFiles: string[] = [];
     try {
       const latestFiles: StorageVisibleFileExpectation[] = [];
+      const showRoot = (manifest.roots?.length ?? 0) > 1;
       for (const [index, file] of manifest.files.entries()) {
         if (typeof file.root !== 'string' || typeof file.path !== 'string' || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)) {
           throw new Error('The newest Google Drive snapshot contains an invalid file entry.');
@@ -734,11 +772,12 @@ export class GoogleDriveProvider implements StorageProvider {
           key: objectKey,
           sha256: file.sha256,
           displayName: path.posix.basename(file.path),
-          displayPath: `${file.root}/${file.path}`,
+          displayPath: showRoot ? `${file.root}/${file.path}` : file.path,
+          sourcePath: `${file.root}/${file.path}`,
           source,
         });
       }
-      await this.syncVisibleFiles(latestFiles, projectId, newestCommitted.appProperties.snapshotId, signal, reconciliationDepth + 1);
+      await this.syncVisibleFiles(latestFiles, projectId, newestCommitted.appProperties.snapshotId, signal, manifest.roots, reconciliationDepth + 1);
     } finally {
       let cleanupError: unknown;
       for (const file of temporaryFiles) {
