@@ -7,7 +7,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 - Name: SoloSync
 - Type: VS Code developer backup extension
 - Users: Developers who need recoverable snapshots for committed and uncommitted workspace changes, especially AI-assisted coding work.
-- Current stage: Version `0.0.16` is prepared to make the Google Drive backup-file browser recover cleanly when an open VS Code window still holds the previous extension manifest.
+- Current stage: Version `0.0.16` is published, making the Google Drive backup-file browser recover cleanly when an open VS Code window still holds the previous extension manifest.
 - Canonical local path: `/home/ubuntu/project/solosync`
 - Repository: `https://github.com/jobssteve164dev/solosync`
 
@@ -48,7 +48,7 @@ This file stores stable project facts future agents should reuse. Do not paste r
 
 ## Handoff Notes
 
-- `SZLK.solosync@0.0.15` is published on Visual Studio Marketplace and Open VSX; GitHub Release `v0.0.15` contains the packaged VSIX. Its **Backup Files** view lists current SoloSync-managed Google Drive files and restores via a bounded latest-manifest lookup instead of reading every historical manifest. Version `0.0.16` adds an upgrade-manifest guard so an already-open host receives a reload action instead of the raw `No view is registered` error.
+- `SZLK.solosync@0.0.16` is published on Visual Studio Marketplace and Open VSX; GitHub Release `v0.0.16` contains the same packaged VSIX bytes. It adds an upgrade-manifest guard so an already-open host receives a reload action instead of the raw `No view is registered` error, while a fresh host registers both sidebar views normally.
 - `0.0.6` has mock-WebDAV coverage for Basic and Digest authentication, capability probing, verified publish, discovery, restore, corruption rejection, cancellation, and staging cleanup. A real QNAP connection is intentionally pending the next session and must be validated before calling native QNAP support production-verified.
 - `SZLK.solosync@0.0.6` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the same packaged VSIX bytes. It adds native QNAP HTTPS/WebDAV support, but real-device validation is still pending.
 - `SZLK.solosync@0.0.4` is publicly verified on Visual Studio Marketplace and Open VSX; its GitHub Release contains the packaged VSIX.
