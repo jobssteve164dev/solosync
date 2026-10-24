@@ -2,7 +2,7 @@
   "name": "solosync",
   "displayName": "SoloSync",
   "description": "Automatically protect a project folder you choose with restorable snapshots in storage you control.",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "publisher": "SZLK",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -366,5 +366,9 @@
   },
   "dependencies": {
     "webdav": "^5.10.0"
+  },
+  "overrides": {
+    "@azure/identity": "4.13.0",
+    "undici": "7.30.1"
   }
 }

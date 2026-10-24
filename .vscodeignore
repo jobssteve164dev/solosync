@@ -9,6 +9,7 @@ test/**
 worker/**
 scripts/**
 .solopreneur/**
+.playwright-cli/**
 AGENTS.md
 PROJECT_MEMORY.md
 .gitignore

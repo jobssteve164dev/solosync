@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { BackupLocationKind, backupLocationLabels, isPathInsideDirectory, validateBackupDirectory, validateSourceDirectory } from './backupLocation';
 import { BackupSettingsOption, buildBackupSettingsOptions } from './backupSettings';
 import { BackedUpFileItem, BackupFilesTreeProvider } from './backupFilesTree';
+import { createBackupFilesTreeView } from './viewRegistration';
 import { isBackupWorthyGitOperation, readGitState } from './git';
 import { authorizeGoogleDesktop, clearGoogleUploadSessions, GoogleTokenManager, GoogleTokenManagerCache, HostedGoogleTokenManager } from './googleAuth';
 import { googleAuthMode, GoogleAuthMode, shouldRequestGoogleSignIn } from './googleAuthMode';
@@ -272,14 +273,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await provider.validate();
     return provider.listBackedUpFiles();
   });
-  const filesTreeView = vscode.window.createTreeView('solosync.files', { treeDataProvider: filesTree });
+  const filesTreeView = await createBackupFilesTreeView({
+    getCommands: (filterInternal) => vscode.commands.getCommands(filterInternal),
+    createTreeView: (viewId, options) => vscode.window.createTreeView(viewId, options),
+  }, filesTree);
   const output = vscode.window.createOutputChannel('SoloSync');
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   status.command = 'solosync.backupNow';
   status.text = '$(archive) SoloSync';
   status.tooltip = 'Create a workspace snapshot';
   status.show();
-  context.subscriptions.push(status, treeView, filesTreeView, output);
+  context.subscriptions.push(status, treeView, output);
+  if (filesTreeView) {
+    context.subscriptions.push(filesTreeView);
+  } else {
+    const reload = 'Reload Window';
+    void vscode.window.showInformationMessage(
+      'SoloSync was updated. Reload the window to finish opening Backup Files.',
+      reload,
+    ).then(async (selection) => {
+      if (selection === reload) await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    });
+  }
 
   let running: Promise<SnapshotManifest | undefined> | undefined;
   let activeBackupController: AbortController | undefined;
@@ -320,7 +335,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provider = undefined;
     }
 
-    filesTreeView.message = provider instanceof GoogleDriveProvider ? `Current files in ${provider.displayName}` : undefined;
+    if (filesTreeView) {
+      filesTreeView.message = provider instanceof GoogleDriveProvider ? `Current files in ${provider.displayName}` : undefined;
+    }
     filesTree.refresh();
 
     currentSnapshots = [];

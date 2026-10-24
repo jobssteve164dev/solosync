@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.16
+
+- Prevent the **Backup Files** view from triggering a raw registration error when an already-open VS Code or code-server window still has the previous extension manifest.
+- Offer one clear **Reload Window** action to finish the extension update while keeping Backup History and the rest of SoloSync available.
+
 ## 0.0.15
 
 - Add a **Backup Files** view to the SoloSync sidebar for browsing current Google Drive backups by project, folder, and file.
